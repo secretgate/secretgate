@@ -1,0 +1,64 @@
+# Secret detection patterns — regex-based
+# Format: list of service groups, each containing named patterns
+# Borrowed and trimmed from CodeGate's signatures.yaml (Apache 2.0)
+
+- Amazon:
+    - AWS Access Key: "AKIA[0-9A-Z]{16}"
+    - AWS Secret Key: "(?i)aws_secret_access_key\\s*[=:]\\s*['\"]?([A-Za-z0-9/+=]{40})['\"]?"
+    - AWS MWS Token: "amzn\\.mws\\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+
+- Google:
+    - GCP API Key: "AIza[0-9A-Za-z\\-_]{35}"
+    - GCP Service Account: "\"type\":\\s*\"service_account\""
+
+- GitHub:
+    - Personal Access Token: "ghp_[0-9a-zA-Z]{36}"
+    - OAuth Token: "gho_[0-9a-zA-Z]{36}"
+    - Fine-grained PAT: "github_pat_[0-9a-zA-Z_]{82}"
+    - App Token: "(?:ghs|ghr)_[0-9a-zA-Z]{36}"
+
+- GitLab:
+    - Personal Access Token: "glpat-[0-9a-zA-Z\\-_]{20}"
+    - Pipeline Token: "glptt-[0-9a-f]{40}"
+    - Runner Token: "glrt-[0-9a-zA-Z\\-_]{20}"
+
+- Slack:
+    - Bot Token: "xoxb-[0-9]{11}-[0-9]{11}-[0-9a-zA-Z]{24}"
+    - User Token: "xoxp-[0-9]{11}-[0-9]{11}-[0-9a-zA-Z]{24}"
+    - Webhook URL: "https://hooks\\.slack\\.com/services/T[a-zA-Z0-9_]{8,}/B[a-zA-Z0-9_]{8,}/[a-zA-Z0-9_]{24}"
+
+- OpenAI:
+    - API Key: "sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20}"
+    - Project Key: "sk-proj-[a-zA-Z0-9\\-_]{80,}"
+
+- Anthropic:
+    - API Key: "sk-ant-[a-zA-Z0-9\\-_]{80,}"
+
+- Stripe:
+    - Secret Key: "sk_live_[0-9a-zA-Z]{24,}"
+    - Publishable Key: "pk_live_[0-9a-zA-Z]{24,}"
+    - Restricted Key: "rk_live_[0-9a-zA-Z]{24,}"
+
+- Azure:
+    - Connection String: "(?i)DefaultEndpointsProtocol=https;AccountName=[^;]+;AccountKey=[A-Za-z0-9+/=]{88};EndpointSuffix="
+
+- DigitalOcean:
+    - Access Token: "dop_v1_[a-f0-9]{64}"
+    - OAuth Token: "doo_v1_[a-f0-9]{64}"
+
+- Twilio:
+    - API Key: "SK[0-9a-fA-F]{32}"
+    - Account SID: "AC[a-zA-Z0-9_\\-]{34}"
+
+- SendGrid:
+    - API Key: "SG\\.[0-9A-Za-z\\-_]{22}\\.[0-9A-Za-z\\-_]{43}"
+
+- Heroku:
+    - API Key: "(?i)heroku.*['\"][0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}['\"]"
+
+- Generic:
+    - Private Key: "-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"
+    - JWT Token: "eyJ[A-Za-z0-9-_]+\\.eyJ[A-Za-z0-9-_]+\\.[A-Za-z0-9-_.+/=]+"
+    - Bearer Token: "(?i)bearer\\s+[a-zA-Z0-9\\-._~+/]+=*"
+    - Basic Auth: "(?i)basic\\s+[A-Za-z0-9+/=]{20,}"
+    - Password in URL: "(?i)://[^\\s:]+:[^\\s@]+@[^\\s/]+"
