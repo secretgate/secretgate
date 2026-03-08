@@ -38,6 +38,7 @@ class Config:
     signatures_path: Path | None = None  # None = use built-in signatures.yaml
     entropy_threshold: float = 4.0
     mode: str = "redact"  # "redact", "block", or "audit"
+    use_detect_secrets: bool = False  # opt-in: pip install secretgate[detect-secrets]
 
     # Providers
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
@@ -57,16 +58,18 @@ class Config:
             cfg = cls._from_dict(data)
 
         # Env var overrides
-        if port := os.environ.get("AIGATE_PORT"):
+        if port := os.environ.get("SECRETGATE_PORT"):
             cfg.port = int(port)
-        if host := os.environ.get("AIGATE_HOST"):
+        if host := os.environ.get("SECRETGATE_HOST"):
             cfg.host = host
-        if mode := os.environ.get("AIGATE_MODE"):
+        if mode := os.environ.get("SECRETGATE_MODE"):
             cfg.mode = mode
-        if log_level := os.environ.get("AIGATE_LOG_LEVEL"):
+        if log_level := os.environ.get("SECRETGATE_LOG_LEVEL"):
             cfg.log_level = log_level
-        if sigs := os.environ.get("AIGATE_SIGNATURES"):
+        if sigs := os.environ.get("SECRETGATE_SIGNATURES"):
             cfg.signatures_path = Path(sigs)
+        if os.environ.get("SECRETGATE_DETECT_SECRETS", "").lower() in ("1", "true", "yes"):
+            cfg.use_detect_secrets = True
 
         # Set up default providers if none configured
         if not cfg.providers:
@@ -94,6 +97,7 @@ class Config:
             signatures_path=Path(p) if (p := data.get("signatures_path")) else None,
             entropy_threshold=data.get("entropy_threshold", cls.entropy_threshold),
             mode=data.get("mode", cls.mode),
+            use_detect_secrets=data.get("use_detect_secrets", cls.use_detect_secrets),
             providers=providers,
             audit_log=Path(p) if (p := data.get("audit_log")) else None,
         )

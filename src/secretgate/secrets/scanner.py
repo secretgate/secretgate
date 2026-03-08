@@ -40,9 +40,20 @@ class SecretScanner:
         self,
         signatures_path: Path | None = None,
         entropy_threshold: float = 4.0,
+        use_detect_secrets: bool = False,
     ):
         self._entropy_threshold = entropy_threshold
         self._patterns: list[_CompiledPattern] = []
+        self._use_detect_secrets = use_detect_secrets
+
+        if use_detect_secrets:
+            from secretgate.secrets.detect_secrets_adapter import is_available
+
+            if not is_available():
+                raise ImportError(
+                    "detect-secrets is not installed. "
+                    "Install it with: pip install secretgate[detect-secrets]"
+                )
 
         path = signatures_path or Path(__file__).parent.parent / "signatures.yaml"
         self._load_patterns(path)
@@ -102,6 +113,15 @@ class SecretScanner:
                 if em.value not in seen:
                     seen.add(em.value)
                     matches.append(em)
+
+        # Supplementary: detect-secrets regex plugins
+        if self._use_detect_secrets:
+            from secretgate.secrets.detect_secrets_adapter import scan_text
+
+            for dm in scan_text(text):
+                if dm.value not in seen:
+                    seen.add(dm.value)
+                    matches.append(dm)
 
         return matches
 

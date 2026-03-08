@@ -46,6 +46,7 @@ def create_app(config: Config) -> FastAPI:
     scanner = SecretScanner(
         signatures_path=config.signatures_path,
         entropy_threshold=config.entropy_threshold,
+        use_detect_secrets=config.use_detect_secrets,
     )
     pipeline = Pipeline(
         steps=[

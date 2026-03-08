@@ -59,6 +59,23 @@ export ANTHROPIC_BASE_URL=http://localhost:8080/anthropic
 export HTTPS_PROXY=http://localhost:8080
 ```
 
+## Extra detection with detect-secrets
+
+For broader coverage, enable [Yelp's detect-secrets](https://github.com/Yelp/detect-secrets)
+as a supplementary scanner (23 additional regex plugins, entropy detectors disabled to avoid
+false positives):
+
+```bash
+pip install secretgate[detect-secrets]
+secretgate serve --detect-secrets
+```
+
+Or via environment variable:
+
+```bash
+export SECRETGATE_DETECT_SECRETS=true
+```
+
 ## Adding custom secret patterns
 
 Drop patterns in `~/.secretgate/signatures.yaml` or pass `--signatures /path/to/file.yaml`.

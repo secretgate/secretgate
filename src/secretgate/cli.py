@@ -29,6 +29,7 @@ def main():
 @click.option("--signatures", "-s", type=click.Path(exists=True, path_type=Path), help="Custom signatures YAML")
 @click.option("--log-level", default="info", type=click.Choice(["debug", "info", "warning", "error"]))
 @click.option("--log-format", default="text", type=click.Choice(["text", "json"]))
+@click.option("--detect-secrets", "use_detect_secrets", is_flag=True, help="Enable detect-secrets plugins for extra coverage")
 def serve(
     port: int,
     host: str,
@@ -37,6 +38,7 @@ def serve(
     signatures: Path | None,
     log_level: str,
     log_format: str,
+    use_detect_secrets: bool,
 ):
     """Start the secretgate proxy server."""
     from secretgate.config import Config
@@ -64,18 +66,21 @@ def serve(
     cfg.log_level = log_level
     if signatures:
         cfg.signatures_path = signatures
+    if use_detect_secrets:
+        cfg.use_detect_secrets = True
 
     app = create_app(cfg)
     uvicorn.run(app, host=cfg.host, port=cfg.port, log_level=log_level)
 
 
 @main.command()
-def scan():
+@click.option("--detect-secrets", "use_detect_secrets", is_flag=True, help="Enable detect-secrets plugins for extra coverage")
+def scan(use_detect_secrets: bool):
     """Scan stdin for secrets (offline mode)."""
     import sys
     from secretgate.secrets.scanner import SecretScanner
 
-    scanner = SecretScanner()
+    scanner = SecretScanner(use_detect_secrets=use_detect_secrets)
     text = sys.stdin.read()
     matches = scanner.scan(text)
 
