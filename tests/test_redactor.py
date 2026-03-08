@@ -1,7 +1,7 @@
 """Tests for secret redaction and unredaction."""
 
 from secretgate.secrets.scanner import SecretScanner
-from secretgate.secrets.redactor import SecretRedactor, _slugify, _make_placeholder
+from secretgate.secrets.redactor import SecretRedactor, _slugify
 
 
 def test_redact_and_unredact():
