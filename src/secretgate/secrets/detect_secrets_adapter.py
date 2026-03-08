@@ -42,6 +42,7 @@ def is_available() -> bool:
     """Check if detect-secrets is installed."""
     try:
         import detect_secrets  # noqa: F401
+
         return True
     except ImportError:
         return False

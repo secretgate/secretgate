@@ -15,9 +15,7 @@ async def test_redaction_step_redacts_openai_format():
 
     body = {
         "model": "gpt-4",
-        "messages": [
-            {"role": "user", "content": "My key is AKIAIOSFODNN7EXAMPLE"}
-        ],
+        "messages": [{"role": "user", "content": "My key is AKIAIOSFODNN7EXAMPLE"}],
     }
 
     result = await step.process_request(body, ctx)
@@ -37,9 +35,7 @@ async def test_redaction_step_redacts_anthropic_format():
         "messages": [
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": "My key is AKIAIOSFODNN7EXAMPLE"}
-                ],
+                "content": [{"type": "text", "text": "My key is AKIAIOSFODNN7EXAMPLE"}],
             }
         ],
     }
@@ -56,9 +52,7 @@ async def test_block_mode_returns_none():
     step = SecretRedactionStep(scanner, mode="block")
     ctx = PipelineContext()
 
-    body = {
-        "messages": [{"role": "user", "content": "Key: AKIAIOSFODNN7EXAMPLE"}]
-    }
+    body = {"messages": [{"role": "user", "content": "Key: AKIAIOSFODNN7EXAMPLE"}]}
 
     result = await step.process_request(body, ctx)
     assert result is None
@@ -70,9 +64,7 @@ async def test_audit_mode_passes_through():
     step = SecretRedactionStep(scanner, mode="audit")
     ctx = PipelineContext()
 
-    body = {
-        "messages": [{"role": "user", "content": "Key: AKIAIOSFODNN7EXAMPLE"}]
-    }
+    body = {"messages": [{"role": "user", "content": "Key: AKIAIOSFODNN7EXAMPLE"}]}
 
     result = await step.process_request(body, ctx)
     assert result is not None
@@ -83,14 +75,10 @@ async def test_audit_mode_passes_through():
 @pytest.mark.asyncio
 async def test_pipeline_runs_steps_in_order():
     scanner = SecretScanner()
-    pipeline = Pipeline(
-        steps=[SecretRedactionStep(scanner, mode="redact")]
-    )
+    pipeline = Pipeline(steps=[SecretRedactionStep(scanner, mode="redact")])
     ctx = PipelineContext()
 
-    body = {
-        "messages": [{"role": "user", "content": "AKIAIOSFODNN7EXAMPLE"}]
-    }
+    body = {"messages": [{"role": "user", "content": "AKIAIOSFODNN7EXAMPLE"}]}
 
     result = await pipeline.run_request(body, ctx)
     assert result is not None
@@ -100,14 +88,10 @@ async def test_pipeline_runs_steps_in_order():
 @pytest.mark.asyncio
 async def test_clean_request_passes_through():
     scanner = SecretScanner()
-    pipeline = Pipeline(
-        steps=[SecretRedactionStep(scanner, mode="redact")]
-    )
+    pipeline = Pipeline(steps=[SecretRedactionStep(scanner, mode="redact")])
     ctx = PipelineContext()
 
-    body = {
-        "messages": [{"role": "user", "content": "just normal code here"}]
-    }
+    body = {"messages": [{"role": "user", "content": "just normal code here"}]}
 
     result = await pipeline.run_request(body, ctx)
     assert result == body

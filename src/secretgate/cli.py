@@ -26,10 +26,22 @@ def main():
     help="How to handle detected secrets",
 )
 @click.option("--config", "-c", type=click.Path(exists=True, path_type=Path), help="Config file")
-@click.option("--signatures", "-s", type=click.Path(exists=True, path_type=Path), help="Custom signatures YAML")
-@click.option("--log-level", default="info", type=click.Choice(["debug", "info", "warning", "error"]))
+@click.option(
+    "--signatures",
+    "-s",
+    type=click.Path(exists=True, path_type=Path),
+    help="Custom signatures YAML",
+)
+@click.option(
+    "--log-level", default="info", type=click.Choice(["debug", "info", "warning", "error"])
+)
 @click.option("--log-format", default="text", type=click.Choice(["text", "json"]))
-@click.option("--detect-secrets", "use_detect_secrets", is_flag=True, help="Enable detect-secrets plugins for extra coverage")
+@click.option(
+    "--detect-secrets",
+    "use_detect_secrets",
+    is_flag=True,
+    help="Enable detect-secrets plugins for extra coverage",
+)
 def serve(
     port: int,
     host: str,
@@ -74,26 +86,63 @@ def serve(
 
 
 @main.command()
-@click.option("--detect-secrets", "use_detect_secrets", is_flag=True, help="Enable detect-secrets plugins for extra coverage")
-def scan(use_detect_secrets: bool):
-    """Scan stdin for secrets (offline mode)."""
+@click.option(
+    "--detect-secrets",
+    "use_detect_secrets",
+    is_flag=True,
+    help="Enable detect-secrets plugins for extra coverage",
+)
+@click.option(
+    "--no-entropy",
+    is_flag=True,
+    help="Disable entropy-based detection (reduces false positives)",
+)
+@click.argument("files", nargs=-1, type=click.Path(exists=True))
+def scan(use_detect_secrets: bool, no_entropy: bool, files: tuple[str, ...]):
+    """Scan files or stdin for secrets.
+
+    Pass file paths as arguments, or pipe text via stdin.
+
+    \b
+    Examples:
+        secretgate scan .env config.yaml
+        secretgate scan --no-entropy src/
+        cat .env | secretgate scan
+        git diff --cached | secretgate scan
+    """
     import sys
     from secretgate.secrets.scanner import SecretScanner
 
-    scanner = SecretScanner(use_detect_secrets=use_detect_secrets)
-    text = sys.stdin.read()
-    matches = scanner.scan(text)
+    scanner = SecretScanner(
+        use_detect_secrets=use_detect_secrets,
+        enable_entropy=not no_entropy,
+    )
+    total_matches = []
 
-    if not matches:
+    if files:
+        for filepath in files:
+            with open(filepath) as f:
+                text = f.read()
+            matches = scanner.scan(text)
+            for m in matches:
+                preview = m.value[:8] + "..." if len(m.value) > 8 else m.value
+                click.echo(
+                    f"  {filepath}:{m.line_number}: [{m.service}] {m.pattern_name} — {preview}"
+                )
+            total_matches.extend(matches)
+    else:
+        text = sys.stdin.read()
+        matches = scanner.scan(text)
+        for m in matches:
+            preview = m.value[:8] + "..." if len(m.value) > 8 else m.value
+            click.echo(f"  Line {m.line_number}: [{m.service}] {m.pattern_name} — {preview}")
+        total_matches.extend(matches)
+
+    if not total_matches:
         click.echo("No secrets found.")
         return
 
-    for m in matches:
-        # Show truncated value for safety
-        preview = m.value[:8] + "..." if len(m.value) > 8 else m.value
-        click.echo(f"  Line {m.line_number}: [{m.service}] {m.pattern_name} — {preview}")
-
-    click.echo(f"\n{len(matches)} secret(s) found.")
+    click.echo(f"\n{len(total_matches)} secret(s) found.")
     sys.exit(1)
 
 

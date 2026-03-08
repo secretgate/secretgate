@@ -26,7 +26,7 @@ def test_detects_private_key():
 
 def test_detects_high_entropy():
     scanner = SecretScanner()
-    text = 'SECRET_KEY=aB3$xZ9!kL7@mN5&pQ2*rT8^wV4(yU6)'
+    text = "SECRET_KEY=aB3$xZ9!kL7@mN5&pQ2*rT8^wV4(yU6)"
     matches = scanner.scan(text)
     assert any(m.service == "entropy" for m in matches)
 

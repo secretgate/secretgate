@@ -41,8 +41,10 @@ class SecretScanner:
         signatures_path: Path | None = None,
         entropy_threshold: float = 4.0,
         use_detect_secrets: bool = False,
+        enable_entropy: bool = True,
     ):
         self._entropy_threshold = entropy_threshold
+        self._enable_entropy = enable_entropy
         self._patterns: list[_CompiledPattern] = []
         self._use_detect_secrets = use_detect_secrets
 
@@ -109,10 +111,11 @@ class SecretScanner:
                         )
 
             # Entropy-based detection for key=value patterns
-            for em in self._find_entropy_matches(line, line_num):
-                if em.value not in seen:
-                    seen.add(em.value)
-                    matches.append(em)
+            if self._enable_entropy:
+                for em in self._find_entropy_matches(line, line_num):
+                    if em.value not in seen:
+                        seen.add(em.value)
+                        matches.append(em)
 
         # Supplementary: detect-secrets regex plugins
         if self._use_detect_secrets:

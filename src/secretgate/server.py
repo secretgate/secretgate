@@ -66,6 +66,8 @@ def create_app(config: Config) -> FastAPI:
         for provider_config in config.providers.values():
             router = create_provider_router(provider_config, pipeline, http_client)
             app.include_router(router)
-            logger.info("provider_registered", name=provider_config.name, url=provider_config.base_url)
+            logger.info(
+                "provider_registered", name=provider_config.name, url=provider_config.base_url
+            )
 
     return app

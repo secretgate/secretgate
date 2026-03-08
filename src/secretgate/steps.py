@@ -32,7 +32,9 @@ class SecretRedactionStep(PipelineStep):
         for m in matches:
             alert = f"Secret detected: {m.service}/{m.pattern_name} on line {m.line_number}"
             ctx.alerts.append(alert)
-            logger.warning("secret_detected", service=m.service, pattern=m.pattern_name, line=m.line_number)
+            logger.warning(
+                "secret_detected", service=m.service, pattern=m.pattern_name, line=m.line_number
+            )
 
         if self._mode == "block":
             logger.error("request_blocked", secrets_found=len(matches))

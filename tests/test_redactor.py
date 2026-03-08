@@ -33,10 +33,7 @@ def test_redact_multiple_secrets():
     scanner = SecretScanner()
     redactor = SecretRedactor(scanner)
 
-    text = (
-        "aws_key=AKIAIOSFODNN7EXAMPLE\n"
-        "github_token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij\n"
-    )
+    text = "aws_key=AKIAIOSFODNN7EXAMPLE\ngithub_token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij\n"
     redacted = redactor.redact(text)
 
     assert "AKIAIOSFODNN7EXAMPLE" not in redacted
@@ -52,10 +49,7 @@ def test_same_secret_gets_same_placeholder():
     scanner = SecretScanner()
     redactor = SecretRedactor(scanner)
 
-    text = (
-        "first=AKIAIOSFODNN7EXAMPLE\n"
-        "second=AKIAIOSFODNN7EXAMPLE\n"
-    )
+    text = "first=AKIAIOSFODNN7EXAMPLE\nsecond=AKIAIOSFODNN7EXAMPLE\n"
     redacted = redactor.redact(text)
     lines = redacted.strip().splitlines()
 
@@ -81,6 +75,7 @@ def test_placeholder_format_is_self_documenting():
     assert "REDACTED<aws-access-key:" in redacted
     # Hash should be 12 hex chars
     import re
+
     assert re.search(r"REDACTED<aws-access-key:[0-9a-f]{12}>", redacted)
 
 
