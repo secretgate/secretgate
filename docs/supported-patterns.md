@@ -13,8 +13,12 @@ secretgate detects secrets using three methods:
 | Service | Pattern | Prefix / Format |
 |---------|---------|-----------------|
 | AWS | Access Key | `AKIA...` (20 chars) |
+| AWS | Temporary Access Key (STS) | `ASIA...` (20 chars) |
+| AWS | STS Bearer Token | `ABIA...` (20 chars) |
+| AWS | Context Credential | `ACCA...` (20 chars) |
 | AWS | Secret Key | `aws_secret_access_key = ...` (40 chars) |
 | AWS | MWS Token | `amzn.mws.` + UUID |
+| AWS | AppSync API Key | `da2-` + 26 alnum |
 | GCP | API Key | `AIza...` (39 chars) |
 | GCP | Service Account | `"type": "service_account"` |
 | Google | OAuth Access Token | `ya29.` + variable length |
@@ -23,7 +27,15 @@ secretgate detects secrets using three methods:
 | Google | OAuth Refresh Token | `1//` + 40+ chars |
 | Google | Cloud Storage HMAC Access ID | `GOOG` + 57 chars |
 | Firebase | FCM Server Key | `AAAA{7}:{140}` |
-| Azure | Connection String | `DefaultEndpointsProtocol=https;AccountName=...` |
+| Azure | Storage Connection String | `DefaultEndpointsProtocol=https;AccountName=...` |
+| Azure | AD/Entra Client Secret | `...Q~...` (distinctive `Q~` marker) |
+| Azure | DevOps PAT | 75 alnum + `AZDO` + 4 alnum |
+| Azure | Storage Account Key | `AccountKey=` + 88 base64 |
+| Azure | SAS Token | `?sv=...&sig=...` |
+| Azure | Cosmos DB Connection String | `AccountEndpoint=https://*.documents.azure.com;AccountKey=...` |
+| Azure | Service Bus / Event Hub | `Endpoint=sb://*.servicebus.windows.net;SharedAccessKey=...` |
+| Azure | SQL Connection String | `Server=tcp:*.database.windows.net;...Password=...` |
+| Cloudflare | Origin CA Key | `v1.0-` + 24 hex + `-` + 146 hex |
 | DigitalOcean | Access Token | `dop_v1_` + 64 hex |
 | DigitalOcean | OAuth Token | `doo_v1_` + 64 hex |
 | Alibaba Cloud | Access Key ID | `LTAI` + 20 chars |

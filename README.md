@@ -149,7 +149,7 @@ secretgate scan --no-entropy src/         # regex-only (fewer false positives)
 
 ## Supported patterns
 
-secretgate ships with **~75 regex patterns** covering AWS, GCP, Azure, GitHub, GitLab, Slack, Discord, Telegram, OpenAI, Anthropic, Hugging Face, Stripe, Shopify, Twilio, SendGrid, Mailchimp, npm, PyPI, Vercel, Databricks, HashiCorp Vault/Terraform, Grafana, New Relic, Sentry, database connection strings, and more.
+secretgate ships with **~90 regex patterns** covering AWS (including STS/temporary credentials), GCP/Google (OAuth tokens, HMAC, Firebase), Azure (AD secrets, DevOps PATs, Cosmos DB, Service Bus, SAS tokens), Cloudflare, GitHub, GitLab, Slack, Discord, Telegram, OpenAI, Anthropic, Hugging Face, Stripe, Shopify, Twilio, SendGrid, Mailchimp, npm, PyPI, Vercel, Databricks, HashiCorp Vault/Terraform, Grafana, New Relic, Sentry, database connection strings, and more.
 
 See the full list: [docs/supported-patterns.md](docs/supported-patterns.md)
 

@@ -5,9 +5,13 @@
 # --- Cloud Providers ---
 
 - Amazon:
-    - AWS Access Key: "AKIA[0-9A-Z]{16}"
+    - AWS Access Key: "AKIA[A-Z2-7]{16}"
+    - AWS Temporary Access Key: "ASIA[A-Z2-7]{16}"
+    - AWS STS Bearer Token: "ABIA[A-Z2-7]{16}"
+    - AWS Context Credential: "ACCA[A-Z2-7]{16}"
     - AWS Secret Key: "(?i)aws_secret_access_key\\s*[=:]\\s*['\"]?([A-Za-z0-9/+=]{40})['\"]?"
     - AWS MWS Token: "amzn\\.mws\\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    - AWS AppSync API Key: "da2-[a-z0-9]{26}"
 
 - Google:
     - GCP API Key: "AIza[0-9A-Za-z\\-_]{35}"
@@ -22,11 +26,21 @@
     - FCM Server Key: "AAAA[A-Za-z0-9_-]{7}:[A-Za-z0-9_-]{140}"
 
 - Azure:
-    - Connection String: "(?i)DefaultEndpointsProtocol=https;AccountName=[^;]+;AccountKey=[A-Za-z0-9+/=]{88};EndpointSuffix="
+    - Storage Connection String: "(?i)DefaultEndpointsProtocol=https;AccountName=[^;]+;AccountKey=[A-Za-z0-9+/=]{88};EndpointSuffix="
+    - AD Client Secret: "[a-zA-Z0-9_~.]{3}\\dQ~[a-zA-Z0-9_~.-]{31,34}"
+    - DevOps PAT: "[a-zA-Z0-9]{75}AZDO[a-zA-Z0-9]{4}"
+    - Storage Account Key: "(?i)(?:AccountKey|storage_key)\\s*[=:]\\s*['\"]?[A-Za-z0-9+/]{86}==['\"]?"
+    - SAS Token: "[?&]sv=\\d{4}-\\d{2}-\\d{2}&[^#\\s]*sig=[A-Za-z0-9%+/=]{43,}"
+    - Cosmos DB Connection String: "(?i)AccountEndpoint=https://[^;]+\\.documents\\.azure\\.com[^;]*;AccountKey=[A-Za-z0-9+/]{86}=="
+    - Service Bus Connection String: "(?i)Endpoint=sb://[^;]+\\.servicebus\\.windows\\.net[^;]*;SharedAccessKey=[A-Za-z0-9+/]{43}="
+    - SQL Connection String: "(?i)Server\\s*=\\s*tcp:[^;]+\\.database\\.windows\\.net[^;]*;.*Password\\s*=\\s*[^;'\"]{8,}"
 
 - DigitalOcean:
     - Access Token: "dop_v1_[a-f0-9]{64}"
     - OAuth Token: "doo_v1_[a-f0-9]{64}"
+
+- Cloudflare:
+    - Origin CA Key: "v1\\.0-[a-f0-9]{24}-[a-f0-9]{146}"
 
 - Alibaba Cloud:
     - Access Key ID: "LTAI[a-zA-Z0-9]{20}"
