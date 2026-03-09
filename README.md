@@ -5,47 +5,49 @@
 [![License](https://img.shields.io/github/license/secretgate/secretgate)](https://github.com/secretgate/secretgate/blob/main/LICENSE)
 [![CI](https://github.com/secretgate/secretgate/actions/workflows/ci.yml/badge.svg)](https://github.com/secretgate/secretgate/actions/workflows/ci.yml)
 
-A lean security proxy for AI coding tools. Routes all LLM API traffic through
-a local proxy that scans for secrets before they leave your machine.
+A lean security proxy for AI coding tools. Intercepts all outbound traffic and
+scans for secrets before they leave your machine — via API calls, `git push`,
+`curl`, or anything else.
 
 ## Architecture
 
 ```
-IDE / CLI / Agent
+IDE / CLI / Agent (e.g. Claude Code)
        │
+       │  https_proxy=http://localhost:8083
        ▼
-┌──────────────────────────┐
-│     secretgate :8082     │
-│                          │
-│  ┌────────────────────┐  │
-│  │  Secret Scanner    │  │
-│  │  (regex + entropy) │  │
-│  ├────────────────────┤  │
-│  │  Pipeline Steps    │  │
-│  │  (pluggable)       │  │
-│  ├────────────────────┤  │
-│  │  Audit Logger      │  │
-│  └────────────────────┘  │
-│                          │
-│  Reverse proxy per       │
-│  provider, streaming     │
-└───────────┬──────────────┘
+┌──────────────────────────────────────┐
+│            secretgate                │
+│                                      │
+│  :8083 Forward Proxy (all traffic)   │  ← default, intercepts everything
+│  :8082 Reverse Proxy (LLM APIs)     │  ← optional, per-provider routing
+│                                      │
+│  ┌────────────────────────────────┐  │
+│  │  Secret Scanner (~90 regexes) │  │
+│  ├────────────────────────────────┤  │
+│  │  Modes: redact / block / audit│  │
+│  ├────────────────────────────────┤  │
+│  │  Audit Logger                 │  │
+│  └────────────────────────────────┘  │
+│                                      │
+│  TLS MITM: auto-generated CA +      │
+│  per-domain certs, cached in memory  │
+└───────────┬──────────────────────────┘
             │
             ▼
-      LLM Provider APIs
-      (OpenAI, Anthropic, Ollama, ...)
+  github.com, api.anthropic.com,
+  pypi.org, npmjs.com, ...
 ```
 
 ## How it works
 
-1. Configure your AI tool to point at secretgate as its API base URL
-2. secretgate intercepts every outbound request and scans all messages for secrets
+1. Set `https_proxy` to point all traffic through secretgate (or use `secretgate wrap`)
+2. secretgate intercepts every outbound HTTPS request via TLS MITM and scans for secrets
 3. Detected secrets are handled based on the mode:
    - **redact**: replace with `REDACTED<aws-access-key:a1b2c3d4e5f6>` placeholders before forwarding
    - **block**: reject the request entirely
    - **audit**: log and forward unchanged (good for testing)
-4. On the response path, redacted placeholders are restored to their original values
-5. Everything is logged for audit
+4. Everything is logged for audit
 
 Placeholders are deterministic and self-documenting — same secret always produces
 the same placeholder, and the type identifier tells the LLM what kind of secret
@@ -65,57 +67,41 @@ pip install secretgate[detect-secrets]
 
 ## Quickstart
 
-```bash
-secretgate serve                          # start on :8080, redact mode
-secretgate serve --port 8082 --mode audit # audit mode (log only, don't modify)
-secretgate serve --mode block             # block requests containing secrets
-```
-
-## Using with Claude Code
-
-```bash
-# Terminal 1: start the proxy
-secretgate serve --port 8082 --mode audit
-
-# Terminal 2: start Claude Code through the proxy
-ANTHROPIC_BASE_URL=http://localhost:8082/anthropic claude
-```
-
-This routes all Claude Code API traffic through secretgate. Requires an API key
-(`ANTHROPIC_API_KEY`) — OAuth-based login uses a different endpoint that requires
-the forward proxy mode (see below).
-
-**What you'll see in the logs:**
-
-```
-[info     ] request                        messages=19 model=claude-opus-4-6
-[warning  ] secret_detected                line=93 pattern='API Key' service=Anthropic
-[warning  ] secret_detected                line=99 pattern='AWS Access Key' service=Amazon
-[warning  ] secret_detected                line=100 pattern='high-entropy value (Key)' service=entropy
-[warning  ] secrets_audit_only             secrets_found=3
-```
-
-Secrets in conversation history (from previous assistant responses) are caught on
-the next turn when they become part of the outbound request.
-
-## Forward Proxy Mode (intercept all traffic)
-
-The reverse proxy only catches LLM API traffic. An AI agent with shell access can
-leak secrets via `git push`, `curl`, `pip publish`, etc. The **forward proxy** makes
-secretgate a real security boundary — set `https_proxy` and ALL HTTPS traffic flows
-through secretgate.
-
-**Quick start (one command):**
+**One command** — starts the proxy, sets env vars, runs your tool:
 
 ```bash
 secretgate wrap -- claude
 ```
 
-This starts secretgate in the background, sets all proxy env vars, and launches
-Claude Code with all traffic flowing through secretgate. When Claude exits,
-secretgate stops automatically.
+When Claude exits, secretgate stops automatically. All HTTPS traffic from that
+session flows through secretgate.
 
-**Manual setup (two terminals):**
+**First-time setup** (generate and trust the CA certificate):
+
+```bash
+./scripts/setup.sh
+
+# Or manually:
+secretgate ca init          # generate CA
+secretgate ca trust         # print OS-specific trust instructions
+```
+
+**Options:**
+
+```bash
+secretgate wrap -- claude                    # default: redact mode
+secretgate wrap --mode audit -- claude       # audit mode (log only)
+secretgate wrap --mode block -- claude       # block mode (reject secrets)
+secretgate wrap -f 9090 -- curl https://...  # custom proxy port
+```
+
+**Always launch Claude through secretgate** — add to `.bashrc` / `.zshrc`:
+
+```bash
+alias claude-safe='secretgate wrap -- claude'
+```
+
+## Manual setup (two terminals)
 
 ```bash
 # Terminal 1: start with forward proxy enabled
@@ -128,33 +114,28 @@ export SSL_CERT_FILE=$(secretgate ca path)
 claude
 ```
 
-**First-time setup:**
+## What you'll see in the logs
 
-```bash
-# Install, generate CA, and print trust instructions
-./scripts/setup.sh
-
-# Or manually:
-secretgate ca init          # generate CA
-secretgate ca trust         # print OS-specific trust instructions
+```
+[info     ] request                        messages=19 model=claude-opus-4-6
+[warning  ] secret_detected                line=93 pattern='API Key' service=Anthropic
+[warning  ] secret_detected                line=99 pattern='AWS Access Key' service=Amazon
+[warning  ] secret_detected                line=100 pattern='high-entropy value (Key)' service=entropy
+[warning  ] secrets_audit_only             secrets_found=3
 ```
 
-**Options for `wrap`:**
+Secrets in conversation history (from previous assistant responses) are caught on
+the next turn when they become part of the outbound request.
 
-```bash
-secretgate wrap --mode audit -- claude      # audit mode (log only)
-secretgate wrap --mode block -- claude      # block mode (reject secrets)
-secretgate wrap -f 9090 -- curl https://...  # custom proxy port
-```
+## How the forward proxy works
 
 The forward proxy performs TLS MITM (man-in-the-middle) to inspect HTTPS traffic:
 - Generates a local CA certificate (stored in `~/.secretgate/certs/`)
 - Creates per-domain certificates on the fly, cached in memory
 - Scans **outbound** request bodies for secrets (responses pass through unmodified)
 - Uses regex-only scanning (entropy detection disabled to avoid false positives on code/JSON)
-- Uses the same deterministic `REDACTED<slug:hash12>` placeholder format as the reverse proxy
-- Supports `redact`, `block`, and `audit` modes (same as reverse proxy)
-- Handles chunked transfer encoding and streaming responses
+- Uses the same deterministic `REDACTED<slug:hash12>` placeholder format
+- Handles chunked transfer encoding and streaming responses (SSE)
 
 ### Tested with
 
@@ -192,15 +173,12 @@ passthrough_domains:
   - vpn.company.net
 ```
 
-### Always launch Claude through secretgate
+### Limitations
 
-Add to your `.bashrc` / `.zshrc`:
-
-```bash
-alias claude-safe='secretgate wrap -- claude'
-```
-
-Then just use `claude-safe` instead of `claude`.
+- **SSH git remotes** (`git@github.com:...`) bypass HTTP proxy — only HTTPS remotes are intercepted
+- **HTTP/2** not supported (HTTP/1.1 only — sufficient for git, curl, pip, npm)
+- **Node.js apps** need `NODE_EXTRA_CA_CERTS` env var
+- **localhost** bypasses proxy by default — set `no_proxy=""` if needed
 
 ### Helper scripts
 
@@ -212,14 +190,14 @@ Then just use `claude-safe` instead of `claude`.
 ./scripts/with-secretgate.sh curl https://example.com
 ```
 
-### Limitations
+## Reverse proxy mode (LLM APIs only)
 
-- **SSH git remotes** (`git@github.com:...`) bypass HTTP proxy — only HTTPS remotes are intercepted
-- **HTTP/2** not supported (HTTP/1.1 only — sufficient for git, curl, pip, npm)
-- **Node.js apps** need `NODE_EXTRA_CA_CERTS` env var
-- **localhost** bypasses proxy by default — set `no_proxy=""` if needed
+If you only need to scan LLM API traffic (not all HTTPS), use the reverse proxy
+without the forward proxy. Configure your AI tool to use secretgate as its API base URL:
 
-## Using with other AI tools
+```bash
+secretgate serve --port 8082 --mode redact
+```
 
 ```bash
 # OpenAI-compatible tools (Cursor, Continue, etc.)
@@ -231,6 +209,10 @@ export ANTHROPIC_BASE_URL=http://localhost:8082/anthropic
 # Ollama
 export OLLAMA_HOST=http://localhost:8082/ollama
 ```
+
+Note: this only catches traffic explicitly routed to the proxy. An AI agent with
+shell access can still leak secrets via `git push`, `curl`, etc. Use the forward
+proxy for a real security boundary.
 
 ## Modes
 
