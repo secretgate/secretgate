@@ -4,6 +4,19 @@ version = "0.1.0"
 description = "Lean security proxy for AI coding tools — scan and redact secrets before they reach LLM APIs"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+readme = "README.md"
+keywords = ["security", "secrets", "proxy", "llm", "ai", "coding-assistant", "redaction"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+    "Framework :: FastAPI",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
@@ -12,6 +25,11 @@ dependencies = [
     "click>=8.1",
     "structlog>=24.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/secretgate/secretgate"
+Repository = "https://github.com/secretgate/secretgate"
+Issues = "https://github.com/secretgate/secretgate/issues"
 
 [project.optional-dependencies]
 detect-secrets = [
@@ -31,6 +49,9 @@ secretgate = "secretgate.cli:main"
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-data]
+secretgate = ["signatures.yaml"]
 
 [tool.ruff]
 target-version = "py311"
