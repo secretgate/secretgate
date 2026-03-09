@@ -12,6 +12,14 @@
 - Google:
     - GCP API Key: "AIza[0-9A-Za-z\\-_]{35}"
     - GCP Service Account: "\"type\":\\s*\"service_account\""
+    - OAuth Access Token: "ya29\\.[0-9A-Za-z_-]+"
+    - OAuth Client Secret: "GOCSPX-[A-Za-z0-9_-]{28}"
+    - OAuth Client ID: "[0-9]+-[0-9A-Za-z_]{32}\\.apps\\.googleusercontent\\.com"
+    - OAuth Refresh Token: "1//[0-9A-Za-z_-]{40,}"
+    - Cloud Storage HMAC Access ID: "GOOG[A-Za-z0-9]{57}"
+
+- Firebase:
+    - FCM Server Key: "AAAA[A-Za-z0-9_-]{7}:[A-Za-z0-9_-]{140}"
 
 - Azure:
     - Connection String: "(?i)DefaultEndpointsProtocol=https;AccountName=[^;]+;AccountKey=[A-Za-z0-9+/=]{88};EndpointSuffix="

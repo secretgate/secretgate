@@ -17,6 +17,12 @@ secretgate detects secrets using three methods:
 | AWS | MWS Token | `amzn.mws.` + UUID |
 | GCP | API Key | `AIza...` (39 chars) |
 | GCP | Service Account | `"type": "service_account"` |
+| Google | OAuth Access Token | `ya29.` + variable length |
+| Google | OAuth Client Secret | `GOCSPX-` + 28 chars |
+| Google | OAuth Client ID | `{number}-{32chars}.apps.googleusercontent.com` |
+| Google | OAuth Refresh Token | `1//` + 40+ chars |
+| Google | Cloud Storage HMAC Access ID | `GOOG` + 57 chars |
+| Firebase | FCM Server Key | `AAAA{7}:{140}` |
 | Azure | Connection String | `DefaultEndpointsProtocol=https;AccountName=...` |
 | DigitalOcean | Access Token | `dop_v1_` + 64 hex |
 | DigitalOcean | OAuth Token | `doo_v1_` + 64 hex |
