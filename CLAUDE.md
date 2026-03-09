@@ -67,6 +67,7 @@ The forward proxy (`--forward-proxy-port 8083`) intercepts all HTTPS traffic via
 - **curl to httpbin.org** — HTTPS POST with AWS keys (access key ID + secret access key) detected and redacted through the MITM tunnel
 - Other HTTPS tools (git, pip, npm) should work since they all use standard HTTP proxy env vars, but have not been manually verified yet
 - **localhost traffic** bypasses proxy by default (standard HTTP proxy behavior) — use `no_proxy=""` to override
+- **Platforms**: tested on Linux (Ubuntu/WSL2) and Windows; macOS should work but not yet verified
 
 ## Notes
 

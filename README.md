@@ -144,6 +144,11 @@ The forward proxy performs TLS MITM (man-in-the-middle) to inspect HTTPS traffic
 - **git, pip, npm** — should work via standard `https_proxy` env var but not yet manually verified
 - **localhost traffic** bypasses the proxy by default (standard HTTP proxy behavior); set `no_proxy=""` to override
 
+### Tested on
+
+- **Linux** (Ubuntu/WSL2) and **Windows** — `secretgate wrap` and forward proxy verified on both platforms
+- **macOS** — should work but not yet manually verified
+
 ### CA Trust Instructions
 
 ```bash
