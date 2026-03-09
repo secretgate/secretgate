@@ -18,6 +18,9 @@ Lean security proxy for AI coding tools — scans and redacts secrets before the
   - `secrets/redactor.py` — deterministic `REDACTED<slug:hash12>` placeholders via SHA-256
   - `secrets/detect_secrets_adapter.py` — optional Yelp detect-secrets integration (regex plugins only)
   - `signatures.yaml` — ~90 regex patterns (AWS, GCP, GitHub, Slack, OpenAI, Anthropic, Stripe, etc.)
+- `scripts/` — helper scripts
+  - `setup.sh` — one-time setup (install CA, trust instructions, shell config)
+  - `with-secretgate.sh` — standalone wrapper (starts proxy, runs command, stops proxy)
 - `tests/` — pytest test suite (56 tests)
 - `.github/workflows/ci.yml` — matrix CI across Python 3.11–3.13
 
@@ -56,6 +59,7 @@ The forward proxy (`--forward-proxy-port 8083`) intercepts all HTTPS traffic via
 - CA certs stored in `~/.secretgate/certs/` — trust via `secretgate ca trust`
 - `passthrough_domains` config skips MITM for specified domains
 - Supports chunked transfer encoding and streaming responses (SSE)
+- `secretgate wrap -- <command>` starts proxy, sets env vars, runs command, stops proxy on exit
 
 ### Tested with
 

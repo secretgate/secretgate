@@ -105,19 +105,46 @@ leak secrets via `git push`, `curl`, `pip publish`, etc. The **forward proxy** m
 secretgate a real security boundary — set `https_proxy` and ALL HTTPS traffic flows
 through secretgate.
 
+**Quick start (one command):**
+
 ```bash
-# 1. Start with forward proxy enabled
+secretgate wrap -- claude
+```
+
+This starts secretgate in the background, sets all proxy env vars, and launches
+Claude Code with all traffic flowing through secretgate. When Claude exits,
+secretgate stops automatically.
+
+**Manual setup (two terminals):**
+
+```bash
+# Terminal 1: start with forward proxy enabled
 secretgate serve --forward-proxy-port 8083
 
-# 2. Trust the CA certificate (first time only)
-secretgate ca init          # generate CA if needed
-secretgate ca trust         # print OS-specific trust instructions
-
-# 3. In the AI tool's terminal
+# Terminal 2: set env vars and run your tool
 export https_proxy=http://localhost:8083
 export http_proxy=http://localhost:8083
 export SSL_CERT_FILE=$(secretgate ca path)
-claude  # or any other tool — all traffic flows through secretgate
+claude
+```
+
+**First-time setup:**
+
+```bash
+# Install, generate CA, and print trust instructions
+./scripts/setup.sh
+
+# Or manually:
+secretgate ca init          # generate CA
+secretgate ca trust         # print OS-specific trust instructions
+```
+
+**Options for `wrap`:**
+
+```bash
+secretgate wrap --mode audit -- claude      # audit mode (log only)
+secretgate wrap --mode block -- claude      # block mode (reject secrets)
+secretgate wrap -f 9090 -- curl https://...  # custom proxy port
 ```
 
 The forward proxy performs TLS MITM (man-in-the-middle) to inspect HTTPS traffic:
@@ -163,6 +190,26 @@ Skip TLS MITM for specific domains (e.g., internal services):
 passthrough_domains:
   - internal.example.com
   - vpn.company.net
+```
+
+### Always launch Claude through secretgate
+
+Add to your `.bashrc` / `.zshrc`:
+
+```bash
+alias claude-safe='secretgate wrap -- claude'
+```
+
+Then just use `claude-safe` instead of `claude`.
+
+### Helper scripts
+
+- `scripts/setup.sh` — one-time setup: install CA, print trust instructions, suggest shell config
+- `scripts/with-secretgate.sh` — standalone wrapper (starts proxy, runs command, stops proxy)
+
+```bash
+./scripts/with-secretgate.sh claude
+./scripts/with-secretgate.sh curl https://example.com
 ```
 
 ### Limitations
