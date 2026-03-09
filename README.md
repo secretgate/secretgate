@@ -147,6 +147,12 @@ git diff --cached | secretgate scan       # scan staged changes
 secretgate scan --no-entropy src/         # regex-only (fewer false positives)
 ```
 
+## Supported patterns
+
+secretgate ships with **~75 regex patterns** covering AWS, GCP, Azure, GitHub, GitLab, Slack, Discord, Telegram, OpenAI, Anthropic, Hugging Face, Stripe, Shopify, Twilio, SendGrid, Mailchimp, npm, PyPI, Vercel, Databricks, HashiCorp Vault/Terraform, Grafana, New Relic, Sentry, database connection strings, and more.
+
+See the full list: [docs/supported-patterns.md](docs/supported-patterns.md)
+
 ## Adding custom secret patterns
 
 Drop patterns in `~/.secretgate/signatures.yaml` or pass `--signatures /path/to/file.yaml`.
@@ -154,7 +160,7 @@ Drop patterns in `~/.secretgate/signatures.yaml` or pass `--signatures /path/to/
 ```yaml
 - MyCompany:
     - Internal API Key: "myco_[a-zA-Z0-9]{32}"
-    - Database URL: "postgres://.*@prod\\.mycompany\\.com"
+    - Database URL: "myco_db://.*@prod\\.mycompany\\.com"
 ```
 
 ## Development

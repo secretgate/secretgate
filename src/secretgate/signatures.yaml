@@ -1,6 +1,8 @@
 # Secret detection patterns — regex-based
 # Format: list of service groups, each containing named patterns
-# Borrowed and trimmed from CodeGate's signatures.yaml (Apache 2.0)
+# Each pattern should match the secret value itself (group 0 is used)
+
+# --- Cloud Providers ---
 
 - Amazon:
     - AWS Access Key: "AKIA[0-9A-Z]{16}"
@@ -10,6 +12,37 @@
 - Google:
     - GCP API Key: "AIza[0-9A-Za-z\\-_]{35}"
     - GCP Service Account: "\"type\":\\s*\"service_account\""
+
+- Azure:
+    - Connection String: "(?i)DefaultEndpointsProtocol=https;AccountName=[^;]+;AccountKey=[A-Za-z0-9+/=]{88};EndpointSuffix="
+
+- DigitalOcean:
+    - Access Token: "dop_v1_[a-f0-9]{64}"
+    - OAuth Token: "doo_v1_[a-f0-9]{64}"
+
+- Alibaba Cloud:
+    - Access Key ID: "LTAI[a-zA-Z0-9]{20}"
+
+# --- AI / ML Services ---
+
+- OpenAI:
+    - API Key: "sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20}"
+    - Project Key: "sk-proj-[a-zA-Z0-9\\-_]{80,}"
+
+- Anthropic:
+    - API Key: "sk-ant-[a-zA-Z0-9\\-_]{80,}"
+
+- Hugging Face:
+    - Access Token: "hf_[a-zA-Z]{34}"
+    - Org API Token: "api_org_[a-zA-Z]{34}"
+
+- Replicate:
+    - API Token: "r8_[a-zA-Z0-9]{36}"
+
+- Perplexity:
+    - API Key: "pplx-[a-zA-Z0-9]{48}"
+
+# --- Source Control ---
 
 - GitHub:
     - Personal Access Token: "ghp_[0-9a-zA-Z]{36}"
@@ -22,39 +55,181 @@
     - Pipeline Token: "glptt-[0-9a-f]{40}"
     - Runner Token: "glrt-[0-9a-zA-Z\\-_]{20}"
 
+# --- Messaging / Communication ---
+
 - Slack:
     - Bot Token: "xoxb-[0-9]{11}-[0-9]{11}-[0-9a-zA-Z]{24}"
     - User Token: "xoxp-[0-9]{11}-[0-9]{11}-[0-9a-zA-Z]{24}"
+    - App-Level Token: "xapp-\\d+-[A-Z0-9]+-\\d+-[a-z0-9]+"
     - Webhook URL: "https://hooks\\.slack\\.com/services/T[a-zA-Z0-9_]{8,}/B[a-zA-Z0-9_]{8,}/[a-zA-Z0-9_]{24}"
 
-- OpenAI:
-    - API Key: "sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20}"
-    - Project Key: "sk-proj-[a-zA-Z0-9\\-_]{80,}"
+- Discord:
+    - Bot Token: "[MNO][a-zA-Z0-9_-]{23,25}\\.[a-zA-Z0-9_-]{6}\\.[a-zA-Z0-9_-]{27,}"
 
-- Anthropic:
-    - API Key: "sk-ant-[a-zA-Z0-9\\-_]{80,}"
+- Telegram:
+    - Bot API Token: "[0-9]{5,16}:A[a-zA-Z0-9_-]{34}"
+
+- Microsoft Teams:
+    - Webhook URL: "https://[a-z0-9]+\\.webhook\\.office\\.com/webhookb2/[a-z0-9-]+@[a-z0-9-]+/IncomingWebhook/[a-z0-9]+/[a-z0-9-]+"
+
+# --- Payments / Finance ---
 
 - Stripe:
     - Secret Key: "sk_live_[0-9a-zA-Z]{24,}"
     - Publishable Key: "pk_live_[0-9a-zA-Z]{24,}"
     - Restricted Key: "rk_live_[0-9a-zA-Z]{24,}"
 
-- Azure:
-    - Connection String: "(?i)DefaultEndpointsProtocol=https;AccountName=[^;]+;AccountKey=[A-Za-z0-9+/=]{88};EndpointSuffix="
+- Square:
+    - Access Token: "sq0atp-[a-zA-Z0-9_-]{22,60}"
 
-- DigitalOcean:
-    - Access Token: "dop_v1_[a-f0-9]{64}"
-    - OAuth Token: "doo_v1_[a-f0-9]{64}"
+- Plaid:
+    - Access Token: "access-(?:sandbox|development|production)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+
+- Flutterwave:
+    - Secret Key: "FLWSECK_TEST-[a-h0-9]{32}-X"
+
+# --- DevOps / CI/CD ---
+
+- Vercel:
+    - Personal Token: "vcp_[a-zA-Z0-9]{40,}"
+    - Integration Token: "vci_[a-zA-Z0-9]{40,}"
+
+- npm:
+    - Access Token: "npm_[a-z0-9]{36}"
+
+- PyPI:
+    - Upload Token: "pypi-AgEIcHlwaS5vcmc[a-zA-Z0-9_-]{50,}"
+
+- RubyGems:
+    - API Token: "rubygems_[a-f0-9]{48}"
+
+- Postman:
+    - API Token: "PMAK-[a-f0-9]{24}-[a-f0-9]{34}"
+
+- Doppler:
+    - API Token: "dp\\.pt\\.[a-zA-Z0-9]{43}"
+
+- Buildkite:
+    - Agent Token: "bkua_[a-f0-9]{40}"
+
+- Octopus Deploy:
+    - API Key: "API-[A-Z0-9]{26}"
+
+# --- Infrastructure / Hosting ---
+
+- HashiCorp Vault:
+    - Service Token: "hvs\\.[a-zA-Z0-9_-]{90,120}"
+    - Batch Token: "hvb\\.[a-zA-Z0-9_-]{138,300}"
+
+- HashiCorp Terraform:
+    - API Token: "[a-z0-9]{14}\\.atlasv1\\.[a-z0-9_-]{60,70}"
+
+- Pulumi:
+    - API Token: "pul-[a-f0-9]{40}"
+
+- Fly.io:
+    - Access Token: "fo1_[a-zA-Z0-9_-]{43}"
+
+- Databricks:
+    - API Token: "dapi[a-f0-9]{32}"
+
+- PlanetScale:
+    - API Token: "pscale_tkn_[a-zA-Z0-9_.-]{32,64}"
+    - Password: "pscale_pw_[a-zA-Z0-9_.-]{32,64}"
+
+- Supabase:
+    - Service Key: "sbp_[a-f0-9]{40}"
+
+# --- Monitoring / Observability ---
+
+- Grafana:
+    - Cloud API Token: "glc_[A-Za-z0-9+/]{32,400}={0,3}"
+    - Service Account: "glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8}"
+
+- New Relic:
+    - User API Key: "NRAK-[a-z0-9]{27}"
+    - Insert Key: "NRII-[a-z0-9-]{32}"
+    - Browser API Token: "NRJS-[a-f0-9]{19}"
+
+- Sentry:
+    - Org Token: "sntrys_eyJpYXQiO[a-zA-Z0-9+/]{60,400}={0,2}_[a-zA-Z0-9+/]{43}"
+    - User Token: "sntryu_[a-f0-9]{64}"
+
+- Dynatrace:
+    - API Token: "dt0c01\\.[a-zA-Z0-9]{24}\\.[a-zA-Z0-9]{64}"
+
+# --- Email / Marketing ---
+
+- Mailchimp:
+    - API Key: "[a-f0-9]{32}-us\\d{1,2}"
+
+- Mailgun:
+    - Private API Token: "key-[a-f0-9]{32}"
+    - Public Key: "pubkey-[a-f0-9]{32}"
+
+- Sendinblue:
+    - API Token: "xkeysib-[a-f0-9]{64}-[a-zA-Z0-9]{16}"
+
+- SendGrid:
+    - API Key: "SG\\.[0-9A-Za-z\\-_]{22}\\.[0-9A-Za-z\\-_]{43}"
+
+# --- SaaS / Productivity ---
+
+- Shopify:
+    - Access Token: "shpat_[a-fA-F0-9]{32}"
+    - Custom App Token: "shpca_[a-fA-F0-9]{32}"
+    - Private App Token: "shppa_[a-fA-F0-9]{32}"
+    - Shared Secret: "shpss_[a-fA-F0-9]{32}"
+
+- Atlassian:
+    - API Token: "ATATT3[A-Za-z0-9_=-]{186}"
+
+- Notion:
+    - API Token: "ntn_[0-9]{11}[A-Za-z0-9]{35}"
+
+- Linear:
+    - API Key: "lin_api_[a-zA-Z0-9]{40}"
+
+- Airtable:
+    - PAT: "pat[a-zA-Z0-9]{14}\\.[a-f0-9]{64}"
+
+- Typeform:
+    - API Token: "tfp_[a-z0-9_.-]{59}"
+
+# --- Telephony ---
 
 - Twilio:
     - API Key: "SK[0-9a-fA-F]{32}"
     - Account SID: "AC[a-zA-Z0-9_\\-]{34}"
 
-- SendGrid:
-    - API Key: "SG\\.[0-9A-Za-z\\-_]{22}\\.[0-9A-Za-z\\-_]{43}"
+# --- Hosting (Legacy) ---
 
 - Heroku:
     - API Key: "(?i)heroku.*['\"][0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}['\"]"
+
+# --- Security / Identity ---
+
+- 1Password:
+    - Service Account Token: "ops_eyJ[a-zA-Z0-9+/]{250,}={0,3}"
+
+- Age:
+    - Secret Key: "AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}"
+
+# --- Artifact Registries ---
+
+- Artifactory:
+    - API Key: "AKCp[A-Za-z0-9]{69}"
+    - Reference Token: "cmVmd[A-Za-z0-9]{59}"
+
+# --- Database Connection Strings ---
+
+- Database:
+    - MongoDB Connection String: "mongodb(?:\\+srv)?://[^\\s'\"]{10,}"
+    - PostgreSQL Connection String: "postgres(?:ql)?://[^\\s'\"]{10,}"
+    - MySQL Connection String: "mysql://[^\\s'\"]{10,}"
+    - Redis Connection String: "rediss?://[^\\s'\"]{10,}"
+
+# --- Generic Patterns ---
 
 - Generic:
     - Private Key: "-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"

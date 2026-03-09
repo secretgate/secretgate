@@ -23,4 +23,4 @@ repos:
         language: system
         stages: [pre-commit]
         types: [text]
-        exclude: ^(tests/|LICENSE|src/secretgate/signatures\.yaml)
+        exclude: ^(tests/|docs/|LICENSE|README\.md|src/secretgate/signatures\.yaml)
