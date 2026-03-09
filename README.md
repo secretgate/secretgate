@@ -1,5 +1,10 @@
 # secretgate
 
+[![PyPI](https://img.shields.io/pypi/v/secretgate)](https://pypi.org/project/secretgate/)
+[![Python](https://img.shields.io/pypi/pyversions/secretgate)](https://pypi.org/project/secretgate/)
+[![License](https://img.shields.io/github/license/secretgate/secretgate)](https://github.com/secretgate/secretgate/blob/main/LICENSE)
+[![CI](https://github.com/secretgate/secretgate/actions/workflows/ci.yml/badge.svg)](https://github.com/secretgate/secretgate/actions/workflows/ci.yml)
+
 A lean security proxy for AI coding tools. Routes all LLM API traffic through
 a local proxy that scans for secrets before they leave your machine.
 
@@ -46,10 +51,21 @@ Placeholders are deterministic and self-documenting — same secret always produ
 the same placeholder, and the type identifier tells the LLM what kind of secret
 was redacted without exposing the value.
 
-## Quickstart
+## Installation
 
 ```bash
 pip install secretgate
+```
+
+With optional [detect-secrets](https://github.com/Yelp/detect-secrets) support:
+
+```bash
+pip install secretgate[detect-secrets]
+```
+
+## Quickstart
+
+```bash
 secretgate serve                          # start on :8080, redact mode
 secretgate serve --port 8082 --mode audit # audit mode (log only, don't modify)
 secretgate serve --mode block             # block requests containing secrets
