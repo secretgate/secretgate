@@ -101,6 +101,38 @@ secretgate wrap -f 9090 -- curl https://...  # custom proxy port
 alias claude-safe='secretgate wrap -- claude'
 ```
 
+## Compatible tools
+
+`secretgate wrap` works with any tool that respects the standard `https_proxy`
+env var. Just replace `claude` with your tool:
+
+**CLI tools:**
+
+```bash
+secretgate wrap -- claude           # Claude Code
+secretgate wrap -- aider            # Aider (Python)
+secretgate wrap -- codex            # OpenAI Codex CLI (Node.js)
+secretgate wrap -- open-interpreter # Open Interpreter (Python)
+```
+
+**IDEs** (wrap the launch command — env vars propagate to extensions):
+
+```bash
+secretgate wrap -- cursor           # Cursor
+secretgate wrap -- code             # VS Code (with Copilot, Continue, etc.)
+secretgate wrap -- windsurf         # Windsurf
+```
+
+**Notes:**
+- Some Electron apps may have their own proxy settings that override env vars
+- Tools that bundle their own certificate store might ignore `NODE_EXTRA_CA_CERTS` / `SSL_CERT_FILE`
+- SSH-based operations (`git@github.com:...`) bypass the HTTP proxy regardless
+
+We've verified with **Claude Code** and **curl** so far. If you test with other
+tools, we'd love to hear about it — open an issue or PR at
+[github.com/secretgate/secretgate](https://github.com/secretgate/secretgate).
+Testers and contributors are very welcome!
+
 ## Manual setup (two terminals)
 
 ```bash
