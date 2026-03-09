@@ -74,7 +74,7 @@ secretgate wrap -- claude
 ```
 
 When Claude exits, secretgate stops automatically. All HTTPS traffic from that
-session flows through secretgate.
+session flows through secretgate. Works on Linux, macOS, and Windows.
 
 **First-time setup** (generate and trust the CA certificate):
 
@@ -180,7 +180,10 @@ passthrough_domains:
 - **Node.js apps** need `NODE_EXTRA_CA_CERTS` env var
 - **localhost** bypasses proxy by default — set `no_proxy=""` if needed
 
-### Helper scripts
+### Helper scripts (Linux/macOS only)
+
+These require bash and are not available on Windows. Use `secretgate wrap` instead,
+which works on all platforms.
 
 - `scripts/setup.sh` — one-time setup: install CA, print trust instructions, suggest shell config
 - `scripts/with-secretgate.sh` — standalone wrapper (starts proxy, runs command, stops proxy)
