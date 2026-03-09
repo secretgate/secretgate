@@ -196,8 +196,11 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         secretgate wrap --mode audit -- bash
         secretgate wrap -- git push
     """
+    import atexit
     import os
+    import socket
     import subprocess
+    import sys
     import time
 
     from secretgate.certs import CertAuthority
@@ -212,6 +215,22 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         click.echo("Example: secretgate wrap -- claude")
         return
 
+    # Check if the port is already in use
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(0.5)
+        sock.connect(("127.0.0.1", forward_proxy_port))
+        sock.close()
+        click.echo(
+            f"Error: port {forward_proxy_port} is already in use. "
+            f"A previous secretgate process may still be running.",
+            err=True,
+        )
+        click.echo("Kill it first, then retry.", err=True)
+        return
+    except (ConnectionRefusedError, OSError):
+        sock.close()
+
     # Ensure CA exists
     ca = CertAuthority()
     ca.ensure_ca()
@@ -223,8 +242,15 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         f"Starting secretgate (port {port}, forward proxy {forward_proxy_port}, mode {mode})..."
     )
 
+    # On Windows, create a new process group so we can kill the entire tree
+    popen_kwargs = {}
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
     server_proc = subprocess.Popen(
         [
+            sys.executable,
+            "-m",
             "secretgate",
             "serve",
             "--port",
@@ -236,12 +262,34 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
+        **popen_kwargs,
     )
+
+    def _cleanup_server():
+        """Kill the server process — registered with atexit for robustness."""
+        if server_proc.poll() is None:
+            server_proc.terminate()
+            try:
+                server_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                server_proc.kill()
+                server_proc.wait(timeout=2)
+
+    atexit.register(_cleanup_server)
 
     # Wait for proxy to be ready
     for _ in range(50):
-        import socket
-
+        # Check if the server process died early
+        if server_proc.poll() is not None:
+            stderr_out = (
+                server_proc.stderr.read().decode(errors="replace") if server_proc.stderr else ""
+            )
+            click.echo(
+                f"Error: secretgate exited unexpectedly (code {server_proc.returncode})", err=True
+            )
+            if stderr_out:
+                click.echo(stderr_out[-500:], err=True)
+            return
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(0.1)
@@ -249,10 +297,11 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
             sock.close()
             break
         except (ConnectionRefusedError, OSError):
+            sock.close()
             time.sleep(0.1)
     else:
         click.echo("Error: secretgate failed to start", err=True)
-        server_proc.kill()
+        _cleanup_server()
         return
 
     click.echo(f"secretgate running (PID {server_proc.pid})")
@@ -278,11 +327,7 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
     except KeyboardInterrupt:
         pass
     finally:
-        server_proc.terminate()
-        try:
-            server_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            server_proc.kill()
+        _cleanup_server()
         click.echo("secretgate stopped.")
 
 
