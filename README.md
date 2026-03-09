@@ -9,55 +9,99 @@ a local proxy that scans for secrets before they leave your machine.
 IDE / CLI / Agent
        │
        ▼
-┌─────────────────────────┐
-│     secretgate :8080        │
-│                         │
-│  ┌───────────────────┐  │
-│  │  Secret Scanner   │  │
-│  │  (regex+entropy)  │  │
-│  ├───────────────────┤  │
-│  │  Pipeline Steps   │  │
-│  │  (pluggable)      │  │
-│  ├───────────────────┤  │
-│  │  Audit Logger     │  │
-│  └───────────────────┘  │
-│                         │
-│  Reverse proxy per      │
-│  provider, streaming    │
-└────────┬────────────────┘
-         │
-         ▼
-   LLM Provider APIs
-   (OpenAI, Anthropic, Ollama, ...)
+┌──────────────────────────┐
+│     secretgate :8082     │
+│                          │
+│  ┌────────────────────┐  │
+│  │  Secret Scanner    │  │
+│  │  (regex + entropy) │  │
+│  ├────────────────────┤  │
+│  │  Pipeline Steps    │  │
+│  │  (pluggable)       │  │
+│  ├────────────────────┤  │
+│  │  Audit Logger      │  │
+│  └────────────────────┘  │
+│                          │
+│  Reverse proxy per       │
+│  provider, streaming     │
+└───────────┬──────────────┘
+            │
+            ▼
+      LLM Provider APIs
+      (OpenAI, Anthropic, Ollama, ...)
 ```
 
 ## How it works
 
-1. Configure your AI tool to use `http://localhost:8080` as its API base URL
-2. secretgate intercepts every request, scans outbound prompts for secrets
-3. Secrets are redacted with `REDACTED<uuid>` placeholders before forwarding
-4. Responses are scanned; placeholders are restored on the way back
+1. Configure your AI tool to point at secretgate as its API base URL
+2. secretgate intercepts every outbound request and scans all messages for secrets
+3. Detected secrets are handled based on the mode:
+   - **redact**: replace with `REDACTED<aws-access-key:a1b2c3d4e5f6>` placeholders before forwarding
+   - **block**: reject the request entirely
+   - **audit**: log and forward unchanged (good for testing)
+4. On the response path, redacted placeholders are restored to their original values
 5. Everything is logged for audit
+
+Placeholders are deterministic and self-documenting — same secret always produces
+the same placeholder, and the type identifier tells the LLM what kind of secret
+was redacted without exposing the value.
 
 ## Quickstart
 
 ```bash
 pip install secretgate
-secretgate serve                     # start on :8080
-secretgate serve --port 9090         # custom port
-secretgate serve --block              # block requests instead of redacting
+secretgate serve                          # start on :8080, redact mode
+secretgate serve --port 8082 --mode audit # audit mode (log only, don't modify)
+secretgate serve --mode block             # block requests containing secrets
 ```
 
-## Configuration
+## Using with Claude Code
 
 ```bash
-# Point your AI tool at secretgate
-export OPENAI_BASE_URL=http://localhost:8080/openai
-export ANTHROPIC_BASE_URL=http://localhost:8080/anthropic
+# Terminal 1: start the proxy
+secretgate serve --port 8082 --mode audit
 
-# Or use as a generic HTTP proxy
-export HTTPS_PROXY=http://localhost:8080
+# Terminal 2: start Claude Code through the proxy
+ANTHROPIC_BASE_URL=http://localhost:8082/anthropic claude
 ```
+
+This routes all Claude Code API traffic through secretgate. Requires an API key
+(`ANTHROPIC_API_KEY`) — OAuth-based login uses a different endpoint that requires
+HTTPS proxy / TLS MITM (not yet supported).
+
+**What you'll see in the logs:**
+
+```
+[info     ] request                        messages=19 model=claude-opus-4-6
+[warning  ] secret_detected                line=93 pattern='API Key' service=Anthropic
+[warning  ] secret_detected                line=99 pattern='AWS Access Key' service=Amazon
+[warning  ] secret_detected                line=100 pattern='high-entropy value (Key)' service=entropy
+[warning  ] secrets_audit_only             secrets_found=3
+```
+
+Secrets in conversation history (from previous assistant responses) are caught on
+the next turn when they become part of the outbound request.
+
+## Using with other AI tools
+
+```bash
+# OpenAI-compatible tools (Cursor, Continue, etc.)
+export OPENAI_BASE_URL=http://localhost:8082/openai
+
+# Anthropic-compatible tools
+export ANTHROPIC_BASE_URL=http://localhost:8082/anthropic
+
+# Ollama
+export OLLAMA_HOST=http://localhost:8082/ollama
+```
+
+## Modes
+
+| Mode | Behavior | Use case |
+|------|----------|----------|
+| `redact` | Replace secrets with placeholders, restore on response | Production use |
+| `block` | Reject requests containing secrets (HTTP 403) | Strict environments |
+| `audit` | Log secrets but forward request unchanged | Testing, evaluation |
 
 ## Extra detection with detect-secrets
 
@@ -76,6 +120,17 @@ Or via environment variable:
 export SECRETGATE_DETECT_SECRETS=true
 ```
 
+## Offline scanning
+
+Scan files or stdin for secrets without running the proxy:
+
+```bash
+secretgate scan .env config.yaml          # scan specific files
+cat .env | secretgate scan                # scan stdin
+git diff --cached | secretgate scan       # scan staged changes
+secretgate scan --no-entropy src/         # regex-only (fewer false positives)
+```
+
 ## Adding custom secret patterns
 
 Drop patterns in `~/.secretgate/signatures.yaml` or pass `--signatures /path/to/file.yaml`.
@@ -85,3 +140,34 @@ Drop patterns in `~/.secretgate/signatures.yaml` or pass `--signatures /path/to/
     - Internal API Key: "myco_[a-zA-Z0-9]{32}"
     - Database URL: "postgres://.*@prod\\.mycompany\\.com"
 ```
+
+## Development
+
+```bash
+git clone https://github.com/secretgate/secretgate.git
+cd secretgate
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pre-commit install
+
+# Run tests
+pytest tests/ -v
+
+# Lint
+ruff check src/ tests/
+```
+
+## Pre-commit hooks
+
+secretgate includes pre-commit hooks for development. After `pip install -e ".[dev]"`:
+
+```bash
+pre-commit install
+```
+
+This enables ruff lint/format, trailing whitespace fixes, and secretgate's own
+secret scanner on staged files.
+
+## License
+
+Apache 2.0
