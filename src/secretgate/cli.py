@@ -42,6 +42,19 @@ def main():
     is_flag=True,
     help="Enable detect-secrets plugins for extra coverage",
 )
+@click.option(
+    "--forward-proxy-port",
+    "-f",
+    default=None,
+    type=int,
+    help="Port for forward proxy (enables TLS MITM mode)",
+)
+@click.option(
+    "--certs-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Directory for CA certs (default: ~/.secretgate/certs)",
+)
 def serve(
     port: int,
     host: str,
@@ -51,6 +64,8 @@ def serve(
     log_level: str,
     log_format: str,
     use_detect_secrets: bool,
+    forward_proxy_port: int | None,
+    certs_dir: Path | None,
 ):
     """Start the secretgate proxy server."""
     from secretgate.config import Config
@@ -81,6 +96,10 @@ def serve(
         cfg.signatures_path = signatures
     if use_detect_secrets:
         cfg.use_detect_secrets = True
+    if forward_proxy_port is not None:
+        cfg.forward_proxy_port = forward_proxy_port
+    if certs_dir is not None:
+        cfg.certs_dir = certs_dir
 
     app = create_app(cfg)
     uvicorn.run(app, host=cfg.host, port=cfg.port, log_level=log_level)
@@ -145,6 +164,85 @@ def scan(use_detect_secrets: bool, no_entropy: bool, files: tuple[str, ...]):
 
     click.echo(f"\n{len(total_matches)} secret(s) found.")
     sys.exit(1)
+
+
+@main.group()
+def ca():
+    """Manage the secretgate CA certificate."""
+    pass
+
+
+@ca.command("init")
+@click.option(
+    "--certs-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Directory for CA certs (default: ~/.secretgate/certs)",
+)
+def ca_init(certs_dir: Path | None):
+    """Generate a new CA certificate (if one doesn't exist)."""
+    from secretgate.certs import CertAuthority
+
+    authority = CertAuthority(certs_dir)
+    authority.ensure_ca()
+    click.echo(f"CA certificate: {authority.ca_cert_path}")
+
+
+@ca.command("path")
+@click.option(
+    "--certs-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Directory for CA certs (default: ~/.secretgate/certs)",
+)
+def ca_path(certs_dir: Path | None):
+    """Print the path to the CA certificate."""
+    from secretgate.certs import CertAuthority
+
+    authority = CertAuthority(certs_dir)
+    click.echo(authority.ca_cert_path)
+
+
+@ca.command("trust")
+def ca_trust():
+    """Print OS-specific instructions for trusting the CA certificate."""
+    import platform
+
+    from secretgate.certs import CertAuthority
+
+    authority = CertAuthority()
+    cert_path = authority.ca_cert_path
+
+    click.echo(f"CA certificate: {cert_path}\n")
+
+    system = platform.system()
+    if system == "Darwin":
+        click.echo("macOS — add to system keychain:")
+        click.echo("  sudo security add-trusted-cert -d -r trustRoot \\")
+        click.echo(f"    -k /Library/Keychains/System.keychain {cert_path}")
+    elif system == "Linux":
+        click.echo("Ubuntu/Debian:")
+        click.echo(f"  sudo cp {cert_path} /usr/local/share/ca-certificates/secretgate.crt")
+        click.echo("  sudo update-ca-certificates")
+        click.echo()
+        click.echo("Fedora/RHEL:")
+        click.echo(f"  sudo cp {cert_path} /etc/pki/ca-trust/source/anchors/secretgate.crt")
+        click.echo("  sudo update-ca-trust")
+    elif system == "Windows":
+        click.echo("Windows (PowerShell as Administrator):")
+        click.echo(
+            f'  Import-Certificate -FilePath "{cert_path}" -CertStoreLocation Cert:\\LocalMachine\\Root'
+        )
+    else:
+        click.echo(f"Add {cert_path} to your system's trusted CA store.")
+
+    click.echo()
+    click.echo("For Python/httpx/requests:")
+    click.echo(f"  export SSL_CERT_FILE={cert_path}")
+    click.echo(f"  export REQUESTS_CA_BUNDLE={cert_path}")
+    click.echo()
+    click.echo("For Node.js:")
+    click.echo(f"  export NODE_EXTRA_CA_CERTS={cert_path}")
 
 
 if __name__ == "__main__":

@@ -7,15 +7,18 @@ Lean security proxy for AI coding tools — scans and redacts secrets before the
 - `src/secretgate/` — main package
   - `server.py` — FastAPI app assembly, `AppState` dataclass, lifespan management
   - `proxy.py` — reverse proxy core (JSON parsing, pipeline execution, streaming/buffered forwarding)
+  - `forward.py` — forward proxy with TLS MITM (`asyncio.Server`, CONNECT tunnels, HTTP scanning)
+  - `certs.py` — CA cert generation, per-domain cert caching for TLS MITM
+  - `scan.py` — raw text/bytes scanning adapter (wraps `SecretScanner` for forward proxy)
   - `pipeline.py` — pluggable `PipelineStep` / `Pipeline` / `PipelineContext` abstraction
   - `steps.py` — `SecretRedactionStep` (scan + redact) and `AuditLogStep`
-  - `cli.py` — Click CLI (`serve` and `scan` commands)
+  - `cli.py` — Click CLI (`serve`, `scan`, and `ca` commands)
   - `config.py` — Config with env var overrides (prefix `SECRETGATE_`)
   - `secrets/scanner.py` — regex patterns from YAML + Shannon entropy analysis
   - `secrets/redactor.py` — deterministic `REDACTED<slug:hash12>` placeholders via SHA-256
   - `secrets/detect_secrets_adapter.py` — optional Yelp detect-secrets integration (regex plugins only)
-  - `signatures.yaml` — ~30 regex patterns (AWS, GCP, GitHub, Slack, OpenAI, Anthropic, Stripe, etc.)
-- `tests/` — pytest test suite (28 tests)
+  - `signatures.yaml` — ~90 regex patterns (AWS, GCP, GitHub, Slack, OpenAI, Anthropic, Stripe, etc.)
+- `tests/` — pytest test suite (56 tests)
 - `.github/workflows/ci.yml` — matrix CI across Python 3.11–3.13
 
 ## Key patterns
@@ -42,9 +45,32 @@ Package is on PyPI as `secretgate`. To release a new version:
 2. `python -m build`
 3. `twine upload dist/*` (or use GitHub Actions trusted publishing)
 
+## Forward proxy
+
+The forward proxy (`--forward-proxy-port 8083`) intercepts all HTTPS traffic via `https_proxy` env var:
+- Runs as a separate `asyncio.Server` alongside FastAPI (port 8083 by default)
+- Handles CONNECT tunnels with TLS MITM using auto-generated per-domain certs
+- Scans outbound request bodies for secrets (responses pass through unmodified)
+- Uses regex-only scanning (entropy detection disabled to avoid false positives on code/JSON in raw HTTP bodies)
+- Uses the same `REDACTED<slug:hash12>` placeholder format as the reverse proxy
+- CA certs stored in `~/.secretgate/certs/` — trust via `secretgate ca trust`
+- `passthrough_domains` config skips MITM for specified domains
+- Supports chunked transfer encoding and streaming responses (SSE)
+
+### Tested with
+
+- **Claude Code** — all LLM API traffic (api.anthropic.com) intercepted and scanned via CONNECT tunnel, secrets detected in conversation messages (audit + redact modes)
+- **curl to httpbin.org** — HTTPS POST with AWS keys (access key ID + secret access key) detected and redacted through the MITM tunnel
+- Other HTTPS tools (git, pip, npm) should work since they all use standard HTTP proxy env vars, but have not been manually verified yet
+- **localhost traffic** bypasses proxy by default (standard HTTP proxy behavior) — use `no_proxy=""` to override
+
 ## Notes
 
 - Pre-commit hooks require venv active (`language: system`)
 - `--no-entropy` flag avoids false positives in pre-commit scanning
 - Claude Code integration: `ANTHROPIC_BASE_URL=http://localhost:8082/anthropic` (API key only, not OAuth)
 - detect-secrets entropy detectors are disabled due to high false-positive rate
+- Forward proxy requires `cryptography>=42.0` (added to core deps)
+- SSH git remotes (`git@github.com:...`) bypass HTTP proxy — only HTTPS remotes intercepted
+- Node.js apps need `NODE_EXTRA_CA_CERTS` env var to trust the CA
+- Scanner uses capture group(1) when available in regex patterns — allows patterns like AWS Secret Key to extract just the secret value, not the surrounding key name

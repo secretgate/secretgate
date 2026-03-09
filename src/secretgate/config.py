@@ -43,6 +43,11 @@ class Config:
     # Providers
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
 
+    # Forward proxy
+    forward_proxy_port: int | None = None  # None = disabled
+    certs_dir: Path = field(default_factory=lambda: Path.home() / ".secretgate" / "certs")
+    passthrough_domains: list[str] = field(default_factory=list)
+
     # Audit log
     audit_log: Path | None = None  # None = stderr only
 
@@ -70,6 +75,10 @@ class Config:
             cfg.signatures_path = Path(sigs)
         if os.environ.get("SECRETGATE_DETECT_SECRETS", "").lower() in ("1", "true", "yes"):
             cfg.use_detect_secrets = True
+        if fpp := os.environ.get("SECRETGATE_FORWARD_PROXY_PORT"):
+            cfg.forward_proxy_port = int(fpp)
+        if certs := os.environ.get("SECRETGATE_CERTS_DIR"):
+            cfg.certs_dir = Path(certs)
 
         # Set up default providers if none configured
         if not cfg.providers:
@@ -99,5 +108,10 @@ class Config:
             mode=data.get("mode", cls.mode),
             use_detect_secrets=data.get("use_detect_secrets", cls.use_detect_secrets),
             providers=providers,
+            forward_proxy_port=data.get("forward_proxy_port"),
+            certs_dir=Path(p)
+            if (p := data.get("certs_dir"))
+            else Path.home() / ".secretgate" / "certs",
+            passthrough_domains=data.get("passthrough_domains", []),
             audit_log=Path(p) if (p := data.get("audit_log")) else None,
         )

@@ -83,7 +83,7 @@ ANTHROPIC_BASE_URL=http://localhost:8082/anthropic claude
 
 This routes all Claude Code API traffic through secretgate. Requires an API key
 (`ANTHROPIC_API_KEY`) — OAuth-based login uses a different endpoint that requires
-HTTPS proxy / TLS MITM (not yet supported).
+the forward proxy mode (see below).
 
 **What you'll see in the logs:**
 
@@ -97,6 +97,80 @@ HTTPS proxy / TLS MITM (not yet supported).
 
 Secrets in conversation history (from previous assistant responses) are caught on
 the next turn when they become part of the outbound request.
+
+## Forward Proxy Mode (intercept all traffic)
+
+The reverse proxy only catches LLM API traffic. An AI agent with shell access can
+leak secrets via `git push`, `curl`, `pip publish`, etc. The **forward proxy** makes
+secretgate a real security boundary — set `https_proxy` and ALL HTTPS traffic flows
+through secretgate.
+
+```bash
+# 1. Start with forward proxy enabled
+secretgate serve --forward-proxy-port 8083
+
+# 2. Trust the CA certificate (first time only)
+secretgate ca init          # generate CA if needed
+secretgate ca trust         # print OS-specific trust instructions
+
+# 3. In the AI tool's terminal
+export https_proxy=http://localhost:8083
+export http_proxy=http://localhost:8083
+export SSL_CERT_FILE=$(secretgate ca path)
+claude  # or any other tool — all traffic flows through secretgate
+```
+
+The forward proxy performs TLS MITM (man-in-the-middle) to inspect HTTPS traffic:
+- Generates a local CA certificate (stored in `~/.secretgate/certs/`)
+- Creates per-domain certificates on the fly, cached in memory
+- Scans **outbound** request bodies for secrets (responses pass through unmodified)
+- Uses regex-only scanning (entropy detection disabled to avoid false positives on code/JSON)
+- Uses the same deterministic `REDACTED<slug:hash12>` placeholder format as the reverse proxy
+- Supports `redact`, `block`, and `audit` modes (same as reverse proxy)
+- Handles chunked transfer encoding and streaming responses
+
+### Tested with
+
+- **Claude Code** — LLM API traffic intercepted and scanned, secrets in conversation messages detected (audit + redact modes verified)
+- **curl to httpbin.org** — HTTPS POST bodies with AWS access keys and secret keys detected and redacted
+- **git, pip, npm** — should work via standard `https_proxy` env var but not yet manually verified
+- **localhost traffic** bypasses the proxy by default (standard HTTP proxy behavior); set `no_proxy=""` to override
+
+### CA Trust Instructions
+
+```bash
+# macOS
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain $(secretgate ca path)
+
+# Ubuntu/Debian
+sudo cp $(secretgate ca path) /usr/local/share/ca-certificates/secretgate.crt
+sudo update-ca-certificates
+
+# Python/httpx/requests
+export SSL_CERT_FILE=$(secretgate ca path)
+
+# Node.js
+export NODE_EXTRA_CA_CERTS=$(secretgate ca path)
+```
+
+### Passthrough Domains
+
+Skip TLS MITM for specific domains (e.g., internal services):
+
+```yaml
+# config.yaml
+passthrough_domains:
+  - internal.example.com
+  - vpn.company.net
+```
+
+### Limitations
+
+- **SSH git remotes** (`git@github.com:...`) bypass HTTP proxy — only HTTPS remotes are intercepted
+- **HTTP/2** not supported (HTTP/1.1 only — sufficient for git, curl, pip, npm)
+- **Node.js apps** need `NODE_EXTRA_CA_CERTS` env var
+- **localhost** bypasses proxy by default — set `no_proxy=""` if needed
 
 ## Using with other AI tools
 

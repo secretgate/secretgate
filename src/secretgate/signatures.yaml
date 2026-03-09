@@ -9,7 +9,7 @@
     - AWS Temporary Access Key: "ASIA[A-Z2-7]{16}"
     - AWS STS Bearer Token: "ABIA[A-Z2-7]{16}"
     - AWS Context Credential: "ACCA[A-Z2-7]{16}"
-    - AWS Secret Key: "(?i)aws_secret_access_key\\s*[=:]\\s*['\"]?([A-Za-z0-9/+=]{40})['\"]?"
+    - AWS Secret Key: "(?i)['\"]?aws_secret_access_key['\"]?\\s*[=:]\\s*['\"]?([A-Za-z0-9/+=]{40})['\"]?"
     - AWS MWS Token: "amzn\\.mws\\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
     - AWS AppSync API Key: "da2-[a-z0-9]{26}"
 

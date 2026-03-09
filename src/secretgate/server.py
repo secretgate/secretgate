@@ -29,17 +29,54 @@ def create_app(config: Config) -> FastAPI:
     """Build the FastAPI application."""
     state = AppState()
 
+    # Build the scanner early so it can be shared with the forward proxy
+    scanner = SecretScanner(
+        signatures_path=config.signatures_path,
+        entropy_threshold=config.entropy_threshold,
+        use_detect_secrets=config.use_detect_secrets,
+    )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         state.http_client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
+
+        forward_server = None
+        if config.forward_proxy_port:
+            from secretgate.certs import CertAuthority
+            from secretgate.forward import start_forward_proxy
+            from secretgate.scan import TextScanner
+
+            ca = CertAuthority(config.certs_dir)
+            ca.ensure_ca()
+            # Separate scanner for forward proxy: entropy disabled to avoid
+            # false positives on code/JSON in raw HTTP bodies
+            forward_scanner = SecretScanner(
+                signatures_path=config.signatures_path,
+                entropy_threshold=config.entropy_threshold,
+                use_detect_secrets=config.use_detect_secrets,
+                enable_entropy=False,
+            )
+            text_scanner = TextScanner(forward_scanner, mode=config.mode)
+            forward_server = await start_forward_proxy(
+                config.host,
+                config.forward_proxy_port,
+                ca,
+                text_scanner,
+                passthrough_domains=config.passthrough_domains,
+            )
+
         logger.info(
             "secretgate_started",
             version=__version__,
             port=config.port,
+            forward_proxy_port=config.forward_proxy_port,
             mode=config.mode,
             providers=list(config.providers.keys()),
         )
         yield
+        if forward_server:
+            forward_server.close()
+            await forward_server.wait_closed()
         await state.http_client.aclose()
         logger.info("secretgate_stopped")
 
@@ -49,12 +86,6 @@ def create_app(config: Config) -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Build the pipeline
-    scanner = SecretScanner(
-        signatures_path=config.signatures_path,
-        entropy_threshold=config.entropy_threshold,
-        use_detect_secrets=config.use_detect_secrets,
-    )
     pipeline = Pipeline(
         steps=[
             AuditLogStep(),

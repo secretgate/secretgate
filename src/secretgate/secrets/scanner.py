@@ -96,7 +96,9 @@ class SecretScanner:
             # Regex-based detection
             for pat in self._patterns:
                 for m in pat.regex.finditer(line):
-                    value = m.group(0)
+                    # Use first capture group if present (extracts just the secret),
+                    # otherwise use the full match
+                    value = m.group(1) if m.lastindex and m.lastindex >= 1 else m.group(0)
                     if value not in seen:
                         seen.add(value)
                         matches.append(
