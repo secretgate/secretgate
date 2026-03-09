@@ -5,9 +5,19 @@
 [![License](https://img.shields.io/github/license/secretgate/secretgate)](https://github.com/secretgate/secretgate/blob/main/LICENSE)
 [![CI](https://github.com/secretgate/secretgate/actions/workflows/ci.yml/badge.svg)](https://github.com/secretgate/secretgate/actions/workflows/ci.yml)
 
-A lean security proxy for AI coding tools. Intercepts all outbound traffic and
-scans for secrets before they leave your machine — via API calls, `git push`,
-`curl`, or anything else.
+AI coding agents are powerful — but they have shell access, and one wrong
+`curl`, `git push`, or API call can leak your secrets. You shouldn't have to
+choose between productivity and security.
+
+**secretgate** makes AI-assisted development secure by default. One command wraps
+your coding tool in a security boundary that intercepts all outbound traffic and
+catches secrets before they leave your machine. No config changes to your tools,
+no workflow disruption — just `secretgate wrap -- claude` and code with confidence.
+
+Our goal is to make secretgate the state-of-the-art, security-by-design standard
+for AI coding tools — so that every developer, team, and organization can adopt
+AI agents without compromising on security. We believe security should be
+invisible, automatic, and accessible to everyone.
 
 ## Architecture
 
