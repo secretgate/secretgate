@@ -197,7 +197,6 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         secretgate wrap -- git push
     """
     import os
-    import signal
     import subprocess
     import time
 
@@ -279,7 +278,7 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
     except KeyboardInterrupt:
         pass
     finally:
-        server_proc.send_signal(signal.SIGTERM)
+        server_proc.terminate()
         try:
             server_proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -358,12 +357,20 @@ def ca_trust():
         click.echo(f"Add {cert_path} to your system's trusted CA store.")
 
     click.echo()
-    click.echo("For Python/httpx/requests:")
-    click.echo(f"  export SSL_CERT_FILE={cert_path}")
-    click.echo(f"  export REQUESTS_CA_BUNDLE={cert_path}")
-    click.echo()
-    click.echo("For Node.js:")
-    click.echo(f"  export NODE_EXTRA_CA_CERTS={cert_path}")
+    if system == "Windows":
+        click.echo("For Python/httpx/requests (PowerShell):")
+        click.echo(f'  $env:SSL_CERT_FILE="{cert_path}"')
+        click.echo(f'  $env:REQUESTS_CA_BUNDLE="{cert_path}"')
+        click.echo()
+        click.echo("For Node.js (PowerShell):")
+        click.echo(f'  $env:NODE_EXTRA_CA_CERTS="{cert_path}"')
+    else:
+        click.echo("For Python/httpx/requests:")
+        click.echo(f"  export SSL_CERT_FILE={cert_path}")
+        click.echo(f"  export REQUESTS_CA_BUNDLE={cert_path}")
+        click.echo()
+        click.echo("For Node.js:")
+        click.echo(f"  export NODE_EXTRA_CA_CERTS={cert_path}")
 
 
 if __name__ == "__main__":
