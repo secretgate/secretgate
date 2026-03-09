@@ -57,10 +57,11 @@ def serve(
     from secretgate.server import create_app
 
     # Configure logging
+    import logging
+
+    log_level_num = getattr(logging, log_level.upper(), logging.INFO)
     structlog.configure(
-        wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(structlog, log_level.upper(), structlog.INFO)
-        ),
+        wrapper_class=structlog.make_filtering_bound_logger(log_level_num),
         processors=[
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),

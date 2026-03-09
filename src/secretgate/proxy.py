@@ -10,7 +10,7 @@ For each registered provider, we mount routes that:
 from __future__ import annotations
 
 import json
-from typing import AsyncIterator
+from typing import TYPE_CHECKING, AsyncIterator
 
 import httpx
 import structlog
@@ -20,13 +20,16 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from secretgate.config import ProviderConfig
 from secretgate.pipeline import Pipeline, PipelineContext
 
+if TYPE_CHECKING:
+    from secretgate.server import AppState
+
 logger = structlog.get_logger()
 
 
 def create_provider_router(
     provider: ProviderConfig,
     pipeline: Pipeline,
-    http_client: httpx.AsyncClient,
+    state: AppState,
 ) -> APIRouter:
     """Create a FastAPI router that proxies all requests for a provider."""
     router = APIRouter(prefix=f"/{provider.name}")
@@ -44,14 +47,14 @@ def create_provider_router(
         if request.method == "GET" or "application/json" not in request.headers.get(
             "content-type", ""
         ):
-            return await _passthrough(request, upstream_url, headers, http_client)
+            return await _passthrough(request, upstream_url, headers, state.http_client)
 
         # Parse JSON body
         raw_body = await request.body()
         try:
             body = json.loads(raw_body)
         except (json.JSONDecodeError, UnicodeDecodeError):
-            return await _forward_raw(raw_body, upstream_url, headers, http_client)
+            return await _forward_raw(raw_body, upstream_url, headers, state.http_client)
 
         # Run request pipeline
         ctx = PipelineContext()
@@ -76,11 +79,11 @@ def create_provider_router(
 
         if is_streaming:
             return await _forward_streaming(
-                modified_body, upstream_url, headers, http_client, pipeline, ctx
+                modified_body, upstream_url, headers, state.http_client, pipeline, ctx
             )
         else:
             return await _forward_buffered(
-                modified_body, upstream_url, headers, http_client, pipeline, ctx
+                modified_body, upstream_url, headers, state.http_client, pipeline, ctx
             )
 
     return router

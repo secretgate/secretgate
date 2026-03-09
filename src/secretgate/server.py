@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import httpx
 import structlog
-from fastapi import FastAPI
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from fastapi import FastAPI
 
 from secretgate import __version__
 from secretgate.config import Config
@@ -17,14 +18,20 @@ from secretgate.proxy import create_provider_router
 logger = structlog.get_logger()
 
 
+@dataclass
+class AppState:
+    """Shared state populated during lifespan, referenced by route handlers."""
+
+    http_client: httpx.AsyncClient | None = None
+
+
 def create_app(config: Config) -> FastAPI:
     """Build the FastAPI application."""
-    http_client: httpx.AsyncClient | None = None
+    state = AppState()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        nonlocal http_client
-        http_client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
+        state.http_client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
         logger.info(
             "secretgate_started",
             version=__version__,
@@ -33,7 +40,7 @@ def create_app(config: Config) -> FastAPI:
             providers=list(config.providers.keys()),
         )
         yield
-        await http_client.aclose()
+        await state.http_client.aclose()
         logger.info("secretgate_stopped")
 
     app = FastAPI(
@@ -60,14 +67,14 @@ def create_app(config: Config) -> FastAPI:
     async def health():
         return {"status": "ok", "version": __version__}
 
-    # Register provider routes (deferred to use the lifespan client)
-    @app.on_event("startup")
-    async def _mount_providers():
-        for provider_config in config.providers.values():
-            router = create_provider_router(provider_config, pipeline, http_client)
-            app.include_router(router)
-            logger.info(
-                "provider_registered", name=provider_config.name, url=provider_config.base_url
-            )
+    # Register provider routes (state.http_client is populated by lifespan before any request)
+    for provider_config in config.providers.values():
+        router = create_provider_router(provider_config, pipeline, state)
+        app.include_router(router)
+        logger.info(
+            "provider_registered",
+            name=provider_config.name,
+            url=provider_config.base_url,
+        )
 
     return app
