@@ -89,6 +89,10 @@ class CertAuthority:
                 ),
                 critical=True,
             )
+            .add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(self._ca_key.public_key()),
+                critical=False,
+            )
             .sign(self._ca_key, hashes.SHA256())
         )
 
@@ -127,6 +131,10 @@ class CertAuthority:
             )
             .add_extension(
                 x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
+                critical=False,
+            )
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(self._ca_key.public_key()),
                 critical=False,
             )
             .sign(self._ca_key, hashes.SHA256())
