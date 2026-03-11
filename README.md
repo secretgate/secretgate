@@ -65,8 +65,17 @@ was redacted without exposing the value.
 
 ## Installation
 
+**Quick install** (installs via pipx, or falls back to pip):
+
 ```bash
-pip install secretgate
+curl -fsSL https://raw.githubusercontent.com/secretgate/secretgate/main/install.sh | bash
+```
+
+**Or install manually:**
+
+```bash
+pipx install secretgate    # recommended
+pip install secretgate     # if pipx is not available
 ```
 
 With optional [detect-secrets](https://github.com/Yelp/detect-secrets) support:
