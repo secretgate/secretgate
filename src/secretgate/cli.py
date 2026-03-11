@@ -317,6 +317,7 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
             "SSL_CERT_FILE": ca_path,
             "REQUESTS_CA_BUNDLE": ca_path,
             "NODE_EXTRA_CA_CERTS": ca_path,
+            "GIT_SSL_CAINFO": ca_path,
             "no_proxy": "",
         }
     )
