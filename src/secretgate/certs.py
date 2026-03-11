@@ -19,6 +19,37 @@ _CA_VALID_DAYS = 365
 _DOMAIN_VALID_HOURS = 24
 
 
+def _find_system_ca_bundle() -> Path | None:
+    """Find the system CA certificate bundle (not our own CA cert)."""
+    secretgate_dir = str(Path.home() / ".secretgate")
+
+    # Common system locations first (most reliable)
+    candidates = [
+        "/etc/ssl/certs/ca-certificates.crt",  # Debian/Ubuntu
+        "/etc/pki/tls/certs/ca-bundle.crt",  # RHEL/Fedora
+        "/etc/ssl/cert.pem",  # macOS / Alpine
+    ]
+    for c in candidates:
+        p = Path(c)
+        if p.exists():
+            return p
+
+    # Try ssl module (but skip paths inside our own certs dir,
+    # since SSL_CERT_FILE may already point to our CA)
+    paths = ssl.get_default_verify_paths()
+    for candidate in [paths.cafile, paths.openssl_cafile]:
+        if candidate and Path(candidate).exists() and secretgate_dir not in str(candidate):
+            return Path(candidate)
+
+    # Try certifi as last resort
+    try:
+        import certifi
+
+        return Path(certifi.where())
+    except ImportError:
+        return None
+
+
 def _san_for_domain(domain: str) -> list[x509.GeneralName]:
     """Return the appropriate SAN entry — IPAddress for IPs, DNSName for hostnames."""
     try:
@@ -42,6 +73,10 @@ class CertAuthority:
         return self._certs_dir / "ca.crt"
 
     @property
+    def ca_bundle_path(self) -> Path:
+        return self._certs_dir / "ca-bundle.crt"
+
+    @property
     def _ca_key_path(self) -> Path:
         return self._certs_dir / "ca.key"
 
@@ -55,6 +90,8 @@ class CertAuthority:
             )
             self._ca_cert = x509.load_pem_x509_certificate(self.ca_cert_path.read_bytes())
             logger.info("ca_loaded", path=str(self.ca_cert_path))
+            if not self.ca_bundle_path.exists():
+                self.create_ca_bundle()
             return
 
         # Generate new CA
@@ -106,6 +143,22 @@ class CertAuthority:
         self._ca_key_path.chmod(0o600)
         self.ca_cert_path.write_bytes(self._ca_cert.public_bytes(serialization.Encoding.PEM))
         logger.info("ca_generated", path=str(self.ca_cert_path))
+        self.create_ca_bundle()
+
+    def create_ca_bundle(self) -> Path | None:
+        """Create a combined CA bundle with system CAs + secretgate CA.
+
+        Returns the bundle path, or None if system CAs couldn't be found.
+        """
+        system_bundle = _find_system_ca_bundle()
+        if system_bundle is None:
+            logger.warning("no_system_ca_bundle", msg="could not find system CA bundle")
+            return None
+
+        bundle = system_bundle.read_text() + "\n" + self.ca_cert_path.read_text()
+        self.ca_bundle_path.write_text(bundle)
+        logger.info("ca_bundle_created", path=str(self.ca_bundle_path))
+        return self.ca_bundle_path
 
     def get_domain_context(self, domain: str) -> ssl.SSLContext:
         """Get an SSL context with a cert for the given domain, cached in memory."""

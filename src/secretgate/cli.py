@@ -231,10 +231,13 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
     except (ConnectionRefusedError, OSError):
         sock.close()
 
-    # Ensure CA exists
+    # Ensure CA exists and create combined bundle
     ca = CertAuthority()
     ca.ensure_ca()
-    ca_path = str(ca.ca_cert_path)
+    # Use combined bundle (system CAs + secretgate CA) so tools trust both
+    # the MITM cert and upstream servers
+    bundle_path = ca.create_ca_bundle()
+    ca_path = str(bundle_path) if bundle_path else str(ca.ca_cert_path)
 
     # Start secretgate in background
     proxy_url = f"http://localhost:{forward_proxy_port}"
@@ -247,12 +250,18 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
     if sys.platform == "win32":
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
 
+    import shutil
+
+    # Find the secretgate binary — prefer the same entry point that invoked us
+    secretgate_bin = shutil.which("secretgate") or sys.executable
+    server_cmd = (
+        [secretgate_bin, "serve"]
+        if secretgate_bin != sys.executable
+        else [sys.executable, "-m", "secretgate", "serve"]
+    )
     server_proc = subprocess.Popen(
         [
-            sys.executable,
-            "-m",
-            "secretgate",
-            "serve",
+            *server_cmd,
             "--port",
             str(port),
             "--forward-proxy-port",
@@ -351,7 +360,10 @@ def ca_init(certs_dir: Path | None):
 
     authority = CertAuthority(certs_dir)
     authority.ensure_ca()
+    bundle = authority.create_ca_bundle()
     click.echo(f"CA certificate: {authority.ca_cert_path}")
+    if bundle:
+        click.echo(f"CA bundle (system + secretgate): {bundle}")
 
 
 @ca.command("path")
@@ -402,21 +414,22 @@ def ca_trust():
     else:
         click.echo(f"Add {cert_path} to your system's trusted CA store.")
 
+    bundle_path = authority.ca_bundle_path
     click.echo()
     if system == "Windows":
-        click.echo("For Python/httpx/requests (PowerShell):")
-        click.echo(f'  $env:SSL_CERT_FILE="{cert_path}"')
-        click.echo(f'  $env:REQUESTS_CA_BUNDLE="{cert_path}"')
-        click.echo()
-        click.echo("For Node.js (PowerShell):")
+        click.echo("For all tools (combined bundle — recommended, PowerShell):")
+        click.echo(f'  $env:SSL_CERT_FILE="{bundle_path}"')
+        click.echo(f'  $env:REQUESTS_CA_BUNDLE="{bundle_path}"')
+        click.echo(f'  $env:GIT_SSL_CAINFO="{bundle_path}"')
         click.echo(f'  $env:NODE_EXTRA_CA_CERTS="{cert_path}"')
     else:
-        click.echo("For Python/httpx/requests:")
-        click.echo(f"  export SSL_CERT_FILE={cert_path}")
-        click.echo(f"  export REQUESTS_CA_BUNDLE={cert_path}")
-        click.echo()
-        click.echo("For Node.js:")
+        click.echo("For all tools (combined bundle — recommended):")
+        click.echo(f"  export SSL_CERT_FILE={bundle_path}")
+        click.echo(f"  export REQUESTS_CA_BUNDLE={bundle_path}")
+        click.echo(f"  export GIT_SSL_CAINFO={bundle_path}")
         click.echo(f"  export NODE_EXTRA_CA_CERTS={cert_path}")
+        click.echo()
+        click.echo("Or install the CA system-wide (no env vars needed):")
 
 
 if __name__ == "__main__":
