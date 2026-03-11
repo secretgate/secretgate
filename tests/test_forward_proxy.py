@@ -34,8 +34,13 @@ def block_scanner():
 
 @pytest.fixture
 def upstream_ssl(ca):
-    """SSL context that trusts our test CA for upstream connections."""
-    ctx = ssl.create_default_context()
+    """SSL context that trusts only our test CA for upstream connections.
+
+    Uses PROTOCOL_TLS_CLIENT instead of create_default_context() to avoid
+    loading system CAs — a previously installed secretgate CA in the system
+    trust store would conflict (same issuer name, different key).
+    """
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.load_verify_locations(str(ca.ca_cert_path))
     return ctx
 
@@ -191,8 +196,8 @@ class TestCONNECTTunnel:
             response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
             assert b"200 Connection Established" in response
 
-            # Upgrade to TLS (trust our CA)
-            ssl_ctx = ssl.create_default_context()
+            # Upgrade to TLS (trust only our test CA, not system CAs)
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             ssl_ctx.load_verify_locations(str(ca.ca_cert_path))
             await writer.start_tls(ssl_ctx, server_hostname="127.0.0.1")
 
@@ -269,7 +274,7 @@ class TestBlockMode:
             response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
             assert b"200 Connection Established" in response
 
-            ssl_ctx = ssl.create_default_context()
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             ssl_ctx.load_verify_locations(str(ca.ca_cert_path))
             await writer.start_tls(ssl_ctx, server_hostname="127.0.0.1")
 

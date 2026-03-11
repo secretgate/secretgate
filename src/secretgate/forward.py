@@ -165,9 +165,10 @@ class _ConnectionHandler:
             await self._passthrough_tunnel(host, port)
             return
 
+        upstream_ssl = self._upstream_ssl or ssl.create_default_context()
+
         # Connect to the real upstream with TLS verification
         try:
-            upstream_ssl = self._upstream_ssl or ssl.create_default_context()
             up_reader, up_writer = await asyncio.open_connection(host, port, ssl=upstream_ssl)
         except Exception as exc:
             logger.warning("forward_upstream_connect_failed", host=host, error=str(exc))
@@ -191,7 +192,15 @@ class _ConnectionHandler:
         # Now relay HTTP requests/responses through the TLS tunnel with scanning
         # After start_tls, self._reader and self._writer are upgraded to TLS
         try:
-            await self._relay_http(self._reader, self._writer, up_reader, up_writer, host)
+            await self._relay_http(
+                self._reader,
+                self._writer,
+                up_reader,
+                up_writer,
+                host,
+                upstream_ssl=upstream_ssl,
+                upstream_port=port,
+            )
         finally:
             if not up_writer.is_closing():
                 up_writer.close()
@@ -239,6 +248,8 @@ class _ConnectionHandler:
         upstream_reader: asyncio.StreamReader,
         upstream_writer: asyncio.StreamWriter,
         host: str,
+        upstream_ssl: ssl.SSLContext | None = None,
+        upstream_port: int = 443,
     ) -> None:
         """Relay HTTP requests from client to upstream, scanning outbound bodies."""
         while True:
@@ -322,15 +333,56 @@ class _ConnectionHandler:
                 )
                 headers_bytes = headers_text.encode("latin-1")
 
-            # Forward to upstream
-            upstream_writer.write(headers_bytes + scanned_body)
-            await upstream_writer.drain()
+            # Forward to upstream (reconnect if upstream closed the connection)
+            try:
+                upstream_writer.write(headers_bytes + scanned_body)
+                await upstream_writer.drain()
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                # Upstream closed — reconnect
+                logger.debug("forward_upstream_reconnect", host=host)
+                if not upstream_writer.is_closing():
+                    upstream_writer.close()
+                try:
+                    _ssl = upstream_ssl or ssl.create_default_context()
+                    upstream_reader, upstream_writer = await asyncio.open_connection(
+                        host,
+                        upstream_port,
+                        ssl=_ssl,
+                    )
+                except Exception as exc:
+                    logger.warning("forward_upstream_reconnect_failed", host=host, error=str(exc))
+                    return
+                upstream_writer.write(headers_bytes + scanned_body)
+                await upstream_writer.drain()
 
-            # Read response headers from upstream
+            # Read response headers from upstream (with one reconnect attempt)
             resp_header_data = b""
+            reconnected = False
             while b"\r\n\r\n" not in resp_header_data:
                 chunk = await upstream_reader.read(8192)
                 if not chunk:
+                    # Upstream closed before sending response — try reconnecting once
+                    if not reconnected and (
+                        upstream_ssl is not None or self._upstream_ssl is not None
+                    ):
+                        logger.debug("forward_upstream_reconnect_on_read", host=host)
+                        if not upstream_writer.is_closing():
+                            upstream_writer.close()
+                        try:
+                            _ssl = upstream_ssl or ssl.create_default_context()
+                            upstream_reader, upstream_writer = await asyncio.open_connection(
+                                host,
+                                upstream_port,
+                                ssl=_ssl,
+                            )
+                        except Exception:
+                            return
+                        # Resend the request on the new connection
+                        upstream_writer.write(headers_bytes + scanned_body)
+                        await upstream_writer.drain()
+                        resp_header_data = b""
+                        reconnected = True
+                        continue
                     return
                 resp_header_data += chunk
                 if len(resp_header_data) > MAX_BUFFER_SIZE:
