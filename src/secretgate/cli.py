@@ -166,6 +166,26 @@ def scan(use_detect_secrets: bool, no_entropy: bool, files: tuple[str, ...]):
     sys.exit(1)
 
 
+def _find_available_port(preferred: int, max_attempts: int = 20) -> int:
+    """Return *preferred* if it's free, otherwise try successive ports."""
+    import socket
+
+    for offset in range(max_attempts):
+        candidate = preferred + offset
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(0.5)
+            sock.connect(("127.0.0.1", candidate))
+            # Port is in use — try the next one
+            sock.close()
+        except (ConnectionRefusedError, OSError):
+            sock.close()
+            return candidate
+    raise click.ClickException(
+        f"Could not find an available port in range {preferred}–{preferred + max_attempts - 1}"
+    )
+
+
 @main.command(context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
 @click.option(
     "--forward-proxy-port",
@@ -215,21 +235,12 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         click.echo("Example: secretgate wrap -- claude")
         return
 
-    # Check if the port is already in use
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.settimeout(0.5)
-        sock.connect(("127.0.0.1", forward_proxy_port))
-        sock.close()
-        click.echo(
-            f"Error: port {forward_proxy_port} is already in use. "
-            f"A previous secretgate process may still be running.",
-            err=True,
-        )
-        click.echo("Kill it first, then retry.", err=True)
-        return
-    except (ConnectionRefusedError, OSError):
-        sock.close()
+    # Find available ports (auto-increment if already in use)
+    forward_proxy_port = _find_available_port(forward_proxy_port)
+    port = _find_available_port(port)
+    # Ensure the two ports don't collide
+    if port == forward_proxy_port:
+        port = _find_available_port(port + 1)
 
     # Ensure CA exists and create combined bundle
     ca = CertAuthority()
