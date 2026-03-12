@@ -49,7 +49,7 @@
 
 - OpenAI:
     - API Key: "sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20}"
-    - Project Key: "sk-proj-[a-zA-Z0-9\\-_]{80,}"
+    - Project Key: "sk-proj-[a-zA-Z0-9_-]{40,}"
 
 - Anthropic:
     - API Key: "sk-ant-[a-zA-Z0-9\\-_]{80,}"
@@ -64,12 +64,28 @@
 - Perplexity:
     - API Key: "pplx-[a-zA-Z0-9]{48}"
 
+- Groq:
+    - API Key: "gsk_[a-zA-Z0-9]{52}"
+
+- ElevenLabs:
+    - API Key: "sk_[a-f0-9]{32}[a-f0-9]{16}"
+
+- OpenRouter:
+    - API Key: "sk-or-v1-[a-f0-9]{64}"
+
+- Fireworks AI:
+    - API Key: "fw_[a-zA-Z0-9]{40}"
+
+- Deepseek:
+    - API Key: "sk-[a-f0-9]{32}"
+
+
 # --- Source Control ---
 
 - GitHub:
     - Personal Access Token: "ghp_[0-9a-zA-Z]{36}"
     - OAuth Token: "gho_[0-9a-zA-Z]{36}"
-    - Fine-grained PAT: "github_pat_[0-9a-zA-Z_]{82}"
+    - Fine-grained PAT: "github_pat_[0-9a-zA-Z_]{36,}"
     - App Token: "(?:ghs|ghr)_[0-9a-zA-Z]{36}"
 
 - GitLab:
