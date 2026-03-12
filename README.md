@@ -4,6 +4,8 @@
 [![Python](https://img.shields.io/pypi/pyversions/secretgate)](https://pypi.org/project/secretgate/)
 [![License](https://img.shields.io/github/license/secretgate/secretgate)](https://github.com/secretgate/secretgate/blob/main/LICENSE)
 [![CI](https://github.com/secretgate/secretgate/actions/workflows/ci.yml/badge.svg)](https://github.com/secretgate/secretgate/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-76%20passed-brightgreen)](https://github.com/secretgate/secretgate/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/secretgate/secretgate/branch/main/graph/badge.svg)](https://codecov.io/gh/secretgate/secretgate)
 
 AI coding agents are powerful — but they have shell access, and one wrong
 `curl`, `git push`, or API call can leak your secrets. You shouldn't have to
@@ -84,40 +86,59 @@ With optional [detect-secrets](https://github.com/Yelp/detect-secrets) support:
 pip install secretgate[detect-secrets]
 ```
 
-## Quickstart
+## Quick Start
 
-**One command** — starts the proxy, sets env vars, runs your tool:
+### 1. Install
+
+```bash
+pip install secretgate
+```
+
+### 2. Wrap your AI tool — one command, zero config
 
 ```bash
 secretgate wrap -- claude
 ```
 
-When Claude exits, secretgate stops automatically. All HTTPS traffic from that
-session flows through secretgate. Works on Linux, macOS, and Windows.
+That's it. secretgate starts a local proxy, routes all traffic through it,
+scans for secrets, and stops when Claude exits. **Your secrets never leave
+your machine.**
 
-**First-time setup** (generate and trust the CA certificate):
+> 💡 **Tip:** Make it your default with an alias:
+> ```bash
+> echo "alias claude='secretgate wrap -- claude'" >> ~/.zshrc
+> ```
+
+### 3. First-time CA setup (once per machine)
 
 ```bash
-./scripts/setup.sh
-
-# Or manually:
-secretgate ca init          # generate CA
+secretgate ca init          # generate CA certificate
 secretgate ca trust         # print OS-specific trust instructions
 ```
 
-**Options:**
+Or use the setup script: `./scripts/setup.sh`
+
+### Options
 
 ```bash
 secretgate wrap -- claude                    # default: redact mode
 secretgate wrap --mode audit -- claude       # audit mode (log only)
 secretgate wrap --mode block -- claude       # block mode (reject secrets)
+secretgate wrap -v -- claude                 # verbose: stream logs to stderr
 secretgate wrap -f 9090 -- curl https://...  # custom proxy port
 ```
 
-**Always launch Claude through secretgate** — add to `.bashrc` / `.zshrc`:
+### Logging
+
+By default, proxy logs are written to `~/.secretgate/wrap.log`. Use `--verbose`
+to also stream them to stderr, or `--log-file` to customize the path:
 
 ```bash
-alias claude-safe='secretgate wrap -- claude'
+secretgate wrap -- claude                          # logs → ~/.secretgate/wrap.log
+secretgate wrap -v -- claude                       # logs → file + stderr
+secretgate wrap --log-file /tmp/sg.log -- claude   # custom log path
+SECRETGATE_LOG_FILE=/tmp/sg.log secretgate wrap -- claude  # via env var
+tail -f ~/.secretgate/wrap.log                     # monitor in another terminal
 ```
 
 ## Compatible tools
@@ -308,6 +329,19 @@ cat .env | secretgate scan                # scan stdin
 git diff --cached | secretgate scan       # scan staged changes
 secretgate scan --no-entropy src/         # regex-only (fewer false positives)
 ```
+
+### Scan Reports
+
+Get a colored summary report or machine-readable JSON output:
+
+```bash
+secretgate scan --report .env src/        # colored summary with types & counts
+secretgate scan --json .env               # JSON output for CI/CD pipelines
+```
+
+The `--report` mode shows secret types, occurrence counts, confidence levels,
+and affected files in a formatted table. The `--json` mode outputs structured
+data suitable for integration with other tools.
 
 ## Supported patterns
 
