@@ -66,7 +66,7 @@ class CertAuthority:
         self._certs_dir = certs_dir or Path.home() / ".secretgate" / "certs"
         self._ca_key: rsa.RSAPrivateKey | None = None
         self._ca_cert: x509.Certificate | None = None
-        self._domain_cache: dict[str, ssl.SSLContext] = {}
+        self._domain_cache: dict[str, tuple[ssl.SSLContext, datetime.datetime]] = {}
 
     @property
     def ca_cert_path(self) -> Path:
@@ -176,14 +176,18 @@ class CertAuthority:
 
     def get_domain_context(self, domain: str) -> ssl.SSLContext:
         """Get an SSL context with a cert for the given domain, cached in memory."""
+        now = datetime.datetime.now(datetime.timezone.utc)
         if domain in self._domain_cache:
-            return self._domain_cache[domain]
+            ctx, expires_at = self._domain_cache[domain]
+            if expires_at > now:
+                return ctx
+            # cert expired — regenerate
+            del self._domain_cache[domain]
 
         assert self._ca_key is not None and self._ca_cert is not None, "Call ensure_ca() first"
 
         # Generate domain key + cert
         domain_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        now = datetime.datetime.now(datetime.timezone.utc)
         domain_cert = (
             x509.CertificateBuilder()
             .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, domain)]))
@@ -229,5 +233,5 @@ class CertAuthority:
         Path(cert_path).unlink()
         Path(key_path).unlink()
 
-        self._domain_cache[domain] = ctx
+        self._domain_cache[domain] = (ctx, now + datetime.timedelta(hours=_DOMAIN_VALID_HOURS))
         return ctx
