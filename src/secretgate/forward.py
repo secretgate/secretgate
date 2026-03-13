@@ -299,6 +299,7 @@ class _ConnectionHandler:
             content_length_str = req_headers.get("content-length")
             req_transfer = req_headers.get("transfer-encoding", "").lower()
             body = body_start
+            was_chunked = False
 
             if content_length_str is not None:
                 content_length = int(content_length_str)
@@ -309,16 +310,22 @@ class _ConnectionHandler:
                         break
                     body += chunk
             elif "chunked" in req_transfer:
-                # Read all chunked data into body for scanning
+                # Read all raw chunked data then decode to plain bytes so
+                # redaction works on content only (not chunk-size framing) and
+                # so we can switch to Content-Length framing for forwarding.
+                was_chunked = True
+                raw_chunked = body
                 while True:
                     chunk = await client_reader.read(65536)
                     if not chunk:
                         break
-                    body += chunk
-                    if b"\r\n0\r\n\r\n" in body or body.endswith(b"0\r\n\r\n"):
+                    raw_chunked += chunk
+                    if b"\r\n0\r\n\r\n" in raw_chunked or raw_chunked.endswith(b"0\r\n\r\n"):
                         break
-
-            content_length = len(body)
+                body = _decode_chunked(raw_chunked)
+                content_length = len(body)
+            else:
+                content_length = len(body)
 
             # Scan outbound request body
             content_type = req_headers.get("content-type", "application/octet-stream")
@@ -344,16 +351,26 @@ class _ConnectionHandler:
                     await client_writer.drain()
                     return
 
-            # Update Content-Length if body was modified
-            if len(scanned_body) != content_length and content_length > 0:
-                headers_text = headers_bytes.decode("latin-1")
+            # Update headers if body was modified or chunked encoding was decoded
+            new_body_len = len(scanned_body)
+            if was_chunked or (new_body_len != content_length and content_length > 0):
                 import re
 
-                headers_text = re.sub(
-                    r"(?i)content-length:\s*\d+",
-                    f"Content-Length: {len(scanned_body)}",
-                    headers_text,
-                )
+                headers_text = headers_bytes.decode("latin-1")
+                if was_chunked:
+                    # Remove Transfer-Encoding: chunked — body is now plain bytes
+                    headers_text = re.sub(r"(?i)transfer-encoding:\s*chunked\r\n", "", headers_text)
+                if re.search(r"(?i)content-length:", headers_text):
+                    headers_text = re.sub(
+                        r"(?i)content-length:\s*\d+",
+                        f"Content-Length: {new_body_len}",
+                        headers_text,
+                    )
+                else:
+                    # No existing Content-Length — insert one before the blank line
+                    headers_text = headers_text.replace(
+                        "\r\n\r\n", f"\r\nContent-Length: {new_body_len}\r\n\r\n", 1
+                    )
                 headers_bytes = headers_text.encode("latin-1")
 
             # Forward to upstream (reconnect if upstream closed the connection)
@@ -452,7 +469,7 @@ class _ConnectionHandler:
                     client_writer.write(chunk)
                     await client_writer.drain()
                     # Check for end of chunked encoding (0\r\n\r\n)
-                    buf = buf[-5:] + chunk  # keep tail for boundary detection
+                    buf = buf[-7:] + chunk  # keep tail for boundary detection (pattern is 7 bytes)
                     if b"\r\n0\r\n\r\n" in buf or buf.startswith(b"0\r\n\r\n"):
                         break
             else:
