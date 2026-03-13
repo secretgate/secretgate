@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import structlog
+from typing import Any
 
 from secretgate.pipeline import PipelineContext, PipelineStep
 from secretgate.secrets.redactor import SecretRedactor
@@ -82,11 +83,20 @@ class SecretRedactionStep(PipelineStep):
         redactor: SecretRedactor | None = ctx.metadata.get("redactor")
         if not redactor or redactor.count == 0:
             return chunk
-        # Streaming chunks: attempt unredaction on decoded text
+        # Streaming chunks: unredact line by line, skipping thinking block events.
+        # Thinking block content is covered by Anthropic's cryptographic signature;
+        # modifying it (even to restore a placeholder) would invalidate the signature.
         try:
             text = chunk.decode("utf-8")
-            restored = redactor.unredact(text)
-            return restored.encode("utf-8")
+            lines = text.splitlines(keepends=True)
+            out = []
+            for line in lines:
+                data = line[6:] if line.startswith("data: ") else None
+                if data is not None and _is_thinking_sse_data(data):
+                    out.append(line)
+                else:
+                    out.append(redactor.unredact(line))
+            return "".join(out).encode("utf-8")
         except UnicodeDecodeError:
             return chunk
 
@@ -94,10 +104,51 @@ class SecretRedactionStep(PipelineStep):
         redactor: SecretRedactor | None = ctx.metadata.get("redactor")
         if not redactor or redactor.count == 0:
             return body
-        # Walk the response and unredact any text fields
-        text = json.dumps(body)
-        restored = redactor.unredact(text)
-        return json.loads(restored)
+        # Walk the response structure, unredacting string fields but leaving
+        # thinking blocks entirely untouched.  Thinking block content is covered
+        # by Anthropic's cryptographic signature; modifying it would make the
+        # signature invalid when the block is included in the next request turn.
+        _unredact_value(body, redactor)
+        return body
+
+
+def _is_thinking_sse_data(data: str) -> bool:
+    """Return True if this SSE data payload is a thinking-related event."""
+    try:
+        event = json.loads(data)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    cb = event.get("content_block")
+    if isinstance(cb, dict) and cb.get("type") == "thinking":
+        return True
+    delta = event.get("delta")
+    if isinstance(delta, dict) and delta.get("type") in ("thinking_delta", "signature_delta"):
+        return True
+    return False
+
+
+def _unredact_value(value: Any, redactor: SecretRedactor) -> None:
+    if isinstance(value, dict):
+        _unredact_dict(value, redactor)
+    elif isinstance(value, list):
+        for i, item in enumerate(value):
+            if isinstance(item, str):
+                value[i] = redactor.unredact(item)
+            else:
+                _unredact_value(item, redactor)
+
+
+def _unredact_dict(d: dict, redactor: SecretRedactor) -> None:
+    # Skip thinking blocks entirely — their content is covered by Anthropic's
+    # cryptographic signature and must not be modified.
+    if d.get("type") == "thinking":
+        return
+    for key in d:
+        v = d[key]
+        if isinstance(v, str):
+            d[key] = redactor.unredact(v)
+        else:
+            _unredact_value(v, redactor)
 
 
 class AuditLogStep(PipelineStep):

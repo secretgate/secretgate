@@ -20,6 +20,29 @@ logger = structlog.get_logger()
 MAX_BUFFER_SIZE = 10 * 1024 * 1024  # 10MB
 
 
+def _decode_chunked(data: bytes) -> bytes:
+    """Decode HTTP chunked transfer-encoded bytes into raw body bytes."""
+    result = b""
+    pos = 0
+    while pos < len(data):
+        end = data.find(b"\r\n", pos)
+        if end == -1:
+            break
+        size_str = data[pos:end].split(b";")[0].strip()
+        if not size_str:
+            break
+        try:
+            size = int(size_str, 16)
+        except ValueError:
+            break
+        if size == 0:
+            break
+        pos = end + 2
+        result += data[pos : pos + size]
+        pos += size + 2  # skip trailing \r\n after chunk data
+    return result
+
+
 class ForwardProxyServer:
     """Wraps asyncio.Server with active task tracking for clean shutdown."""
 
