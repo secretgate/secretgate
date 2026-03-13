@@ -186,6 +186,11 @@ def _find_available_port(preferred: int, max_attempts: int = 20) -> int:
     )
 
 
+def _default_log_dir() -> Path:
+    """Return the default log directory (~/.secretgate)."""
+    return Path.home() / ".secretgate"
+
+
 @main.command(context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
 @click.option(
     "--forward-proxy-port",
@@ -202,17 +207,32 @@ def _find_available_port(preferred: int, max_attempts: int = 20) -> int:
     default="redact",
     help="How to handle detected secrets",
 )
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    help="Stream proxy logs to stderr (in addition to the log file)",
+)
+@click.option(
+    "--log-file",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Log file path (default: ~/.secretgate/wrap.log, set to /dev/null to disable)",
+)
 @click.pass_context
-def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
+def wrap(ctx, forward_proxy_port: int, port: int, mode: str, verbose: bool, log_file: Path | None):
     """Run a command with all traffic routed through secretgate.
 
     Starts the forward proxy in the background, sets proxy env vars,
     and runs the given command. Stops the proxy when the command exits.
 
+    Proxy logs are written to ~/.secretgate/wrap.log by default (or
+    $SECRETGATE_LOG_FILE). Use --verbose / -v to also stream them to stderr.
+
     \b
     Examples:
         secretgate wrap -- claude
-        secretgate wrap -- curl https://example.com
+        secretgate wrap -v -- claude
         secretgate wrap --mode audit -- bash
         secretgate wrap -- git push
     """
@@ -235,6 +255,17 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         click.echo("Example: secretgate wrap -- claude")
         return
 
+    # Resolve log file path: explicit flag > env var > default
+    if log_file is None:
+        env_log = os.environ.get("SECRETGATE_LOG_FILE")
+        if env_log:
+            log_file = Path(env_log)
+        else:
+            log_file = _default_log_dir() / "wrap.log"
+
+    # Ensure the log directory exists
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
     # Find available ports (auto-increment if already in use)
     forward_proxy_port = _find_available_port(forward_proxy_port)
     port = _find_available_port(port)
@@ -255,6 +286,7 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
     click.echo(
         f"Starting secretgate (port {port}, forward proxy {forward_proxy_port}, mode {mode})..."
     )
+    click.echo(f"Logs: {log_file}")
 
     # On Windows, create a new process group so we can kill the entire tree
     popen_kwargs = {}
@@ -270,6 +302,14 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         if secretgate_bin != sys.executable
         else [sys.executable, "-m", "secretgate", "serve"]
     )
+
+    # Open log file for writing — proxy stdout and stderr both go here
+    log_fh = open(log_file, "a")
+
+    # In verbose mode, we tee stderr to both the log file and the terminal.
+    # We use a pipe + background reader thread to avoid blocking.
+    stderr_target = subprocess.PIPE if verbose else log_fh
+
     server_proc = subprocess.Popen(
         [
             *server_cmd,
@@ -280,10 +320,29 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
             "--mode",
             mode,
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        stdout=log_fh,
+        stderr=stderr_target,
         **popen_kwargs,
     )
+
+    # If verbose, start a thread that reads stderr and writes to both log + terminal
+    tee_thread = None
+    if verbose and server_proc.stderr:
+        import threading
+
+        def _tee_stderr():
+            try:
+                for line in server_proc.stderr:
+                    decoded = line.decode(errors="replace") if isinstance(line, bytes) else line
+                    sys.stderr.write(decoded)
+                    sys.stderr.flush()
+                    log_fh.write(decoded)
+                    log_fh.flush()
+            except (ValueError, OSError):
+                pass  # file closed during shutdown
+
+        tee_thread = threading.Thread(target=_tee_stderr, daemon=True)
+        tee_thread.start()
 
     def _cleanup_server():
         """Kill the server process — registered with atexit for robustness."""
@@ -294,6 +353,10 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
             except subprocess.TimeoutExpired:
                 server_proc.kill()
                 server_proc.wait(timeout=2)
+        try:
+            log_fh.close()
+        except (ValueError, OSError):
+            pass
 
     atexit.register(_cleanup_server)
 
@@ -301,9 +364,15 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
     for _ in range(50):
         # Check if the server process died early
         if server_proc.poll() is not None:
-            stderr_out = (
-                server_proc.stderr.read().decode(errors="replace") if server_proc.stderr else ""
-            )
+            stderr_out = ""
+            if verbose and server_proc.stderr:
+                stderr_out = server_proc.stderr.read().decode(errors="replace")
+            else:
+                # Read from log file for error reporting
+                try:
+                    stderr_out = log_file.read_text()[-500:]
+                except OSError:
+                    pass
             click.echo(
                 f"Error: secretgate exited unexpectedly (code {server_proc.returncode})", err=True
             )
