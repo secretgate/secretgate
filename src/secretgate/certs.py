@@ -89,10 +89,24 @@ class CertAuthority:
                 self._ca_key_path.read_bytes(), password=None
             )
             self._ca_cert = x509.load_pem_x509_certificate(self.ca_cert_path.read_bytes())
-            logger.info("ca_loaded", path=str(self.ca_cert_path))
-            if not self.ca_bundle_path.exists():
-                self.create_ca_bundle()
-            return
+            now = datetime.datetime.now(datetime.timezone.utc)
+            if self._ca_cert.not_valid_after_utc <= now:
+                logger.warning(
+                    "ca_expired",
+                    expired_at=self._ca_cert.not_valid_after_utc.isoformat(),
+                    msg="CA certificate has expired — regenerating",
+                )
+                self.ca_cert_path.unlink(missing_ok=True)
+                self._ca_key_path.unlink(missing_ok=True)
+                self.ca_bundle_path.unlink(missing_ok=True)
+                self._ca_key = None
+                self._ca_cert = None
+                # fall through to generation below
+            else:
+                logger.info("ca_loaded", path=str(self.ca_cert_path))
+                if not self.ca_bundle_path.exists():
+                    self.create_ca_bundle()
+                return
 
         # Generate new CA
         self._ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
