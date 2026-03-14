@@ -221,8 +221,8 @@
 # --- Telephony ---
 
 - Twilio:
-    - API Key: "SK[0-9a-fA-F]{32}"
-    - Account SID: "AC[a-zA-Z0-9_\\-]{34}"
+    - API Key: "\\bSK[0-9a-fA-F]{32}\\b"
+    - Account SID: "\\bAC[a-f0-9]{32}\\b"
 
 # --- Hosting (Legacy) ---
 
@@ -246,16 +246,15 @@
 # --- Database Connection Strings ---
 
 - Database:
-    - MongoDB Connection String: "mongodb(?:\\+srv)?://[^\\s'\"]{10,}"
-    - PostgreSQL Connection String: "postgres(?:ql)?://[^\\s'\"]{10,}"
-    - MySQL Connection String: "mysql://[^\\s'\"]{10,}"
-    - Redis Connection String: "rediss?://[^\\s'\"]{10,}"
+    - MongoDB Connection String: "mongodb(?:\\+srv)?://[^\\s'\"/:]+:[^\\s'\"@]+@[^\\s'\"]{5,}"
+    - PostgreSQL Connection String: "postgres(?:ql)?://[^\\s'\"/:]+:[^\\s'\"@]+@[^\\s'\"]{5,}"
+    - MySQL Connection String: "mysql://[^\\s'\"/:]+:[^\\s'\"@]+@[^\\s'\"]{5,}"
+    - Redis Connection String: "rediss?://[^\\s'\"/:]+:[^\\s'\"@]+@[^\\s'\"]{5,}"
 
 # --- Generic Patterns ---
 
 - Generic:
     - Private Key: "-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"
     - JWT Token: "eyJ[A-Za-z0-9-_]+\\.eyJ[A-Za-z0-9-_]+\\.[A-Za-z0-9-_.+/=]+"
-    - Bearer Token: "(?i)bearer\\s+[a-zA-Z0-9\\-._~+/]+=*"
     - Basic Auth: "(?i)basic\\s+[A-Za-z0-9+/=]{20,}"
-    - Password in URL: "(?i)://[^\\s:]+:[^\\s@]+@[^\\s/]+"
+    - Password in URL: "(?i)(?:https?|ftp|amqp)://[^\\s'\"/:]+:[^\\s'\"@]{8,}@[^\\s'\"/@]+"

@@ -6,6 +6,8 @@ instead of structured JSON messages.
 
 from __future__ import annotations
 
+import json
+
 import structlog
 
 from secretgate.secrets.redactor import _make_placeholder
@@ -61,7 +63,13 @@ class TextScanner:
         except Exception:
             return body, alerts
 
-        matches = self._scanner.scan(text)
+        # For JSON bodies (LLM API requests), strip content that should not
+        # be scanned: assistant messages (model-generated, already scanned on
+        # input) and thinking blocks (cryptographic signatures).
+        ct = content_type.lower().split(";")[0].strip()
+        scannable = self._strip_model_content(text) if "json" in ct else text
+
+        matches = self._scanner.scan(scannable)
         if not matches:
             return body, alerts
 
@@ -88,6 +96,90 @@ class TextScanner:
             text = text.replace(m.value, _make_placeholder(m))
 
         return text.encode("utf-8"), alerts
+
+    @staticmethod
+    def _strip_model_content(text: str) -> str:
+        """Strip content that should not be scanned from LLM API request JSON.
+
+        Only keeps content that needs scanning:
+        - The last contiguous run of user-role messages (the current turn)
+
+        Everything else is blanked:
+        - System prompt: static config (CLAUDE.md, tool defs), audit
+          separately with ``secretgate scan``
+        - Assistant messages: model-generated, already scanned on input
+        - Earlier user messages: already scanned when originally sent
+        """
+        try:
+            body = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return text
+
+        if not isinstance(body, dict):
+            return text
+
+        # Blank the system prompt — it's static config that doesn't change
+        # between requests and triggers false positives from tool definitions,
+        # CLAUDE.md content, etc.
+        system = body.get("system")
+        if isinstance(system, str) and system:
+            body["system"] = ""
+            modified_system = True
+        elif isinstance(system, list):
+            for block in system:
+                if isinstance(block, dict) and "text" in block and block["text"]:
+                    block["text"] = ""
+            modified_system = True
+        else:
+            modified_system = False
+
+        messages = body.get("messages")
+        if not isinstance(messages, list):
+            return text
+
+        # Find where the last user turn starts: walk backwards from the end
+        # and keep user-role messages until we hit an assistant message.
+        last_turn_start = len(messages)
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                last_turn_start = i
+            else:
+                break
+
+        modified = False
+        for i, msg in enumerate(messages):
+            if not isinstance(msg, dict):
+                continue
+
+            # Keep the last user turn — it's the new content to scan
+            if i >= last_turn_start:
+                # Still strip thinking blocks (signatures must never be touched)
+                content = msg.get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "thinking":
+                            for key in ("thinking", "signature"):
+                                if key in block and block[key]:
+                                    block[key] = ""
+                                    modified = True
+                continue
+
+            # Blank all earlier messages (already scanned in previous turns)
+            content = msg.get("content")
+            if isinstance(content, str) and content:
+                msg["content"] = ""
+                modified = True
+            elif isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    for key in ("text", "thinking", "signature", "content"):
+                        if key in block and isinstance(block[key], str) and block[key]:
+                            block[key] = ""
+                            modified = True
+
+        return json.dumps(body) if (modified or modified_system) else text
 
 
 class BlockedError(Exception):
