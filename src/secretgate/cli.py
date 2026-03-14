@@ -117,8 +117,25 @@ def serve(
     is_flag=True,
     help="Disable entropy-based detection (reduces false positives)",
 )
+@click.option(
+    "--report",
+    is_flag=True,
+    help="Show a colored summary report grouped by secret type",
+)
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    help="Output results as JSON",
+)
 @click.argument("files", nargs=-1, type=click.Path(exists=True))
-def scan(use_detect_secrets: bool, no_entropy: bool, files: tuple[str, ...]):
+def scan(
+    use_detect_secrets: bool,
+    no_entropy: bool,
+    report: bool,
+    json_output: bool,
+    files: tuple[str, ...],
+):
     """Scan files or stdin for secrets.
 
     Pass file paths as arguments, or pipe text via stdin.
@@ -127,6 +144,8 @@ def scan(use_detect_secrets: bool, no_entropy: bool, files: tuple[str, ...]):
     Examples:
         secretgate scan .env config.yaml
         secretgate scan --no-entropy src/
+        secretgate scan --report .env
+        secretgate scan --json .env
         cat .env | secretgate scan
         git diff --cached | secretgate scan
     """
@@ -138,25 +157,42 @@ def scan(use_detect_secrets: bool, no_entropy: bool, files: tuple[str, ...]):
         enable_entropy=not no_entropy,
     )
     total_matches = []
+    file_matches: dict[str, list] = {}
 
     if files:
         for filepath in files:
             with open(filepath) as f:
                 text = f.read()
             matches = scanner.scan(text)
-            for m in matches:
-                preview = m.value[:8] + "..." if len(m.value) > 8 else m.value
-                click.echo(
-                    f"  {filepath}:{m.line_number}: [{m.service}] {m.pattern_name} — {preview}"
-                )
+            if not json_output and not report:
+                for m in matches:
+                    preview = m.value[:8] + "..." if len(m.value) > 8 else m.value
+                    click.echo(
+                        f"  {filepath}:{m.line_number}: [{m.service}] {m.pattern_name} — {preview}"
+                    )
+            file_matches[filepath] = matches
             total_matches.extend(matches)
     else:
         text = sys.stdin.read()
         matches = scanner.scan(text)
-        for m in matches:
-            preview = m.value[:8] + "..." if len(m.value) > 8 else m.value
-            click.echo(f"  Line {m.line_number}: [{m.service}] {m.pattern_name} — {preview}")
+        if not json_output and not report:
+            for m in matches:
+                preview = m.value[:8] + "..." if len(m.value) > 8 else m.value
+                click.echo(f"  Line {m.line_number}: [{m.service}] {m.pattern_name} — {preview}")
+        file_matches["<stdin>"] = matches
         total_matches.extend(matches)
+
+    if json_output:
+        _output_json(total_matches, file_matches)
+        if total_matches:
+            sys.exit(1)
+        return
+
+    if report:
+        _output_report(total_matches, file_matches)
+        if total_matches:
+            sys.exit(1)
+        return
 
     if not total_matches:
         click.echo("No secrets found.")
@@ -164,6 +200,89 @@ def scan(use_detect_secrets: bool, no_entropy: bool, files: tuple[str, ...]):
 
     click.echo(f"\n{len(total_matches)} secret(s) found.")
     sys.exit(1)
+
+
+def _output_json(total_matches: list, file_matches: dict) -> None:
+    """Output scan results as JSON."""
+    import json as json_mod
+
+    results = {
+        "total": len(total_matches),
+        "files_scanned": len(file_matches),
+        "secrets": [],
+        "summary": {},
+    }
+
+    for filepath, matches in file_matches.items():
+        for m in matches:
+            results["secrets"].append(
+                {
+                    "file": filepath,
+                    "line": m.line_number,
+                    "service": m.service,
+                    "pattern": m.pattern_name,
+                    "confidence": "high" if m.service != "entropy" else "medium",
+                    "preview": m.value[:8] + "..." if len(m.value) > 8 else m.value,
+                }
+            )
+
+    # Build summary by service/pattern
+    from collections import Counter
+
+    type_counts = Counter(f"{m.service}/{m.pattern_name}" for m in total_matches)
+    results["summary"] = dict(type_counts.most_common())
+
+    click.echo(json_mod.dumps(results, indent=2))
+
+
+def _output_report(total_matches: list, file_matches: dict) -> None:
+    """Output a colored summary report."""
+    from collections import Counter
+
+    if not total_matches:
+        click.secho("✅ No secrets found.", fg="green", bold=True)
+        return
+
+    click.echo()
+    click.secho("╔══════════════════════════════════════════╗", fg="red", bold=True)
+    click.secho("║        SECRET SCAN REPORT                ║", fg="red", bold=True)
+    click.secho("╚══════════════════════════════════════════╝", fg="red", bold=True)
+    click.echo()
+
+    # Summary by type
+    type_counts = Counter(f"{m.service}/{m.pattern_name}" for m in total_matches)
+    click.secho("Secret Types Found:", fg="yellow", bold=True)
+    click.echo()
+    for secret_type, count in type_counts.most_common():
+        service, pattern = secret_type.split("/", 1)
+        confidence = "🟢 high" if service != "entropy" else "🟡 medium"
+        click.echo(f"  {'🔑' if count > 1 else '🔐'} ", nl=False)
+        click.secho(f"{pattern}", fg="red", bold=True, nl=False)
+        click.echo(f" ({service}) — ", nl=False)
+        click.secho(f"{count}", fg="cyan", bold=True, nl=False)
+        click.echo(f" occurrence(s) — confidence: {confidence}")
+
+    click.echo()
+
+    # File breakdown
+    files_with_secrets = {f: m for f, m in file_matches.items() if m}
+    if len(files_with_secrets) > 1:
+        click.secho("Files Affected:", fg="yellow", bold=True)
+        click.echo()
+        for filepath, matches in files_with_secrets.items():
+            click.echo(f"  📄 {filepath}: ", nl=False)
+            click.secho(f"{len(matches)} secret(s)", fg="red")
+        click.echo()
+
+    # Totals
+    click.secho("─" * 44, fg="white")
+    click.echo("  Total secrets: ", nl=False)
+    click.secho(f"{len(total_matches)}", fg="red", bold=True)
+    click.echo("  Files scanned: ", nl=False)
+    click.secho(f"{len(file_matches)}", fg="cyan")
+    click.echo("  Files affected: ", nl=False)
+    click.secho(f"{len(files_with_secrets)}", fg="yellow")
+    click.echo()
 
 
 def _find_available_port(preferred: int, max_attempts: int = 20) -> int:
@@ -202,8 +321,20 @@ def _find_available_port(preferred: int, max_attempts: int = 20) -> int:
     default="redact",
     help="How to handle detected secrets",
 )
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    help="Stream proxy logs to stderr in addition to the log file",
+)
+@click.option(
+    "--log-file",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Log file path (default: ~/.secretgate/wrap.log or $SECRETGATE_LOG_FILE)",
+)
 @click.pass_context
-def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
+def wrap(ctx, forward_proxy_port: int, port: int, mode: str, verbose: bool, log_file: Path | None):
     """Run a command with all traffic routed through secretgate.
 
     Starts the forward proxy in the background, sets proxy env vars,
@@ -256,6 +387,13 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         f"Starting secretgate (port {port}, forward proxy {forward_proxy_port}, mode {mode})..."
     )
 
+    # Determine log file path
+    if log_file is None:
+        log_file = Path(os.environ.get("SECRETGATE_LOG_FILE", ""))
+        if not str(log_file) or str(log_file) == ".":
+            log_file = Path.home() / ".secretgate" / "wrap.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
     # On Windows, create a new process group so we can kill the entire tree
     popen_kwargs = {}
     if sys.platform == "win32":
@@ -270,6 +408,10 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         if secretgate_bin != sys.executable
         else [sys.executable, "-m", "secretgate", "serve"]
     )
+
+    # Open log file for writing proxy output
+    log_fh = open(log_file, "a")
+
     server_proc = subprocess.Popen(
         [
             *server_cmd,
@@ -280,10 +422,34 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
             "--mode",
             mode,
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
         **popen_kwargs,
     )
+
+    # If --verbose, start a background thread to tail the log to stderr
+    log_tailer = None
+    if verbose:
+        import threading
+
+        def _tail_log():
+            """Tail the log file and stream new lines to stderr."""
+            try:
+                with open(log_file) as tail_fh:
+                    while server_proc.poll() is None:
+                        line = tail_fh.readline()
+                        if line:
+                            click.echo(line, nl=False, err=True)
+                        else:
+                            time.sleep(0.1)
+                    # Read remaining lines after process exits
+                    for line in tail_fh:
+                        click.echo(line, nl=False, err=True)
+            except Exception:
+                pass
+
+        log_tailer = threading.Thread(target=_tail_log, daemon=True)
+        log_tailer.start()
 
     def _cleanup_server():
         """Kill the server process — registered with atexit for robustness."""
@@ -294,6 +460,7 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
             except subprocess.TimeoutExpired:
                 server_proc.kill()
                 server_proc.wait(timeout=2)
+        log_fh.close()
 
     atexit.register(_cleanup_server)
 
@@ -325,6 +492,9 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         return
 
     click.echo(f"secretgate running (PID {server_proc.pid})")
+    click.echo(f"Logs: {log_file}")
+    if verbose:
+        click.echo("Verbose mode: streaming logs to stderr")
 
     # Run the command with proxy env vars
     env = os.environ.copy()
