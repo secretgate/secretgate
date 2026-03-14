@@ -455,3 +455,55 @@ class TestChunkedEncoding:
         finally:
             echo_server.close()
             await echo_server.wait_closed()
+
+
+class TestErrorResponses:
+    async def test_502_when_upstream_drops_connection(self, ca, proxy_server):
+        """Proxy should send 502 instead of EOF when upstream drops the connection."""
+        _, port = proxy_server
+
+        # Start a server that accepts the TLS connection then immediately closes
+        ssl_ctx = ca.get_domain_context("127.0.0.1")
+
+        async def handle(reader, writer):
+            # Read request headers then close without responding
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    break
+                data += chunk
+            writer.close()
+            await writer.wait_closed()
+
+        drop_server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=ssl_ctx)
+        drop_port = drop_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+
+            connect_req = (
+                f"CONNECT 127.0.0.1:{drop_port} HTTP/1.1\r\nHost: 127.0.0.1:{drop_port}\r\n\r\n"
+            )
+            writer.write(connect_req.encode())
+            await writer.drain()
+
+            response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 Connection Established" in response
+
+            ssl_ctx_client = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx_client.load_verify_locations(str(ca.ca_cert_path))
+            await writer.start_tls(ssl_ctx_client, server_hostname="127.0.0.1")
+
+            inner_request = b"GET /test HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+            writer.write(inner_request)
+            await writer.drain()
+
+            inner_response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            # Should get a proper 502 error, not EOF
+            assert b"502 Bad Gateway" in inner_response
+
+            writer.close()
+        finally:
+            drop_server.close()
+            await drop_server.wait_closed()
