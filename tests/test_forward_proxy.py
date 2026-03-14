@@ -296,3 +296,162 @@ class TestBlockMode:
         finally:
             echo_server.close()
             await echo_server.wait_closed()
+
+
+async def _run_chunked_echo_https_server(ca: CertAuthority, host: str = "127.0.0.1"):
+    """HTTPS echo server that returns the request body as a chunked response."""
+    ssl_ctx = ca.get_domain_context(host)
+
+    async def handle(reader, writer):
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = await reader.read(4096)
+            if not chunk:
+                writer.close()
+                return
+            data += chunk
+
+        header_end = data.index(b"\r\n\r\n") + 4
+        body_start = data[header_end:]
+        headers_text = data[:header_end].decode("latin-1")
+        content_length = 0
+        for line in headers_text.split("\r\n"):
+            if line.lower().startswith("content-length:"):
+                content_length = int(line.split(":", 1)[1].strip())
+                break
+
+        body = body_start
+        while len(body) < content_length:
+            chunk = await reader.read(4096)
+            if not chunk:
+                break
+            body += chunk
+
+        # Echo back using chunked transfer encoding
+        response_body = body if body else b"OK"
+        response_headers = (
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n"
+        )
+        writer.write(response_headers)
+        await writer.drain()
+
+        # Send body in two chunks
+        mid = len(response_body) // 2 or 1
+        for part in [response_body[:mid], response_body[mid:]]:
+            chunk_header = f"{len(part):x}\r\n".encode()
+            writer.write(chunk_header + part + b"\r\n")
+            await writer.drain()
+
+        # Terminal chunk
+        writer.write(b"0\r\n\r\n")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(handle, host, 0, ssl=ssl_ctx)
+    return server
+
+
+class TestChunkedEncoding:
+    async def test_chunked_request_body_decoded(self, ca, proxy_server):
+        """Chunked request body should be decoded and scanned for secrets."""
+        _, port = proxy_server
+
+        echo_server = await _run_echo_https_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+
+            connect_req = (
+                f"CONNECT 127.0.0.1:{echo_port} HTTP/1.1\r\nHost: 127.0.0.1:{echo_port}\r\n\r\n"
+            )
+            writer.write(connect_req.encode())
+            await writer.drain()
+
+            response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 Connection Established" in response
+
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx.load_verify_locations(str(ca.ca_cert_path))
+            await writer.start_tls(ssl_ctx, server_hostname="127.0.0.1")
+
+            # Send a chunked request with a secret embedded in chunk data
+            secret = b"REDACTED<aws-access-key:1a5d44a2dca1>"
+            chunk1 = b"data="
+            chunk2 = secret
+            chunked_body = (
+                f"{len(chunk1):x}\r\n".encode()
+                + chunk1
+                + b"\r\n"
+                + f"{len(chunk2):x}\r\n".encode()
+                + chunk2
+                + b"\r\n"
+                + b"0\r\n\r\n"
+            )
+            inner_request = (
+                b"POST /test HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: application/x-www-form-urlencoded\r\n"
+                b"Transfer-Encoding: chunked\r\n"
+                b"\r\n" + chunked_body
+            )
+            writer.write(inner_request)
+            await writer.drain()
+
+            inner_response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 OK" in inner_response
+            # Secret should be redacted
+            assert b"REDACTED<aws-access-key:1a5d44a2dca1>" not in inner_response
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
+
+    async def test_chunked_response_relayed(self, ca, proxy_server):
+        """Chunked response from upstream should be streamed through to client."""
+        _, port = proxy_server
+
+        echo_server = await _run_chunked_echo_https_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+
+            connect_req = (
+                f"CONNECT 127.0.0.1:{echo_port} HTTP/1.1\r\nHost: 127.0.0.1:{echo_port}\r\n\r\n"
+            )
+            writer.write(connect_req.encode())
+            await writer.drain()
+
+            response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 Connection Established" in response
+
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx.load_verify_locations(str(ca.ca_cert_path))
+            await writer.start_tls(ssl_ctx, server_hostname="127.0.0.1")
+
+            body = b"hello chunked world"
+            inner_request = (
+                b"POST /test HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: text/plain\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"\r\n" + body
+            )
+            writer.write(inner_request)
+            await writer.drain()
+
+            inner_response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 OK" in inner_response
+            assert b"Transfer-Encoding: chunked" in inner_response
+            # Body is split across chunks, so check the terminal chunk was relayed
+            assert b"0\r\n\r\n" in inner_response
+            # Verify the body content is present (may span chunk boundaries)
+            assert b"hello chu" in inner_response
+            assert b"nked world" in inner_response
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()

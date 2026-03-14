@@ -7,9 +7,11 @@ Handles HTTP CONNECT tunnels by performing TLS MITM with generated certs.
 from __future__ import annotations
 
 import asyncio
+import re
 import ssl
 from urllib.parse import urlparse
 
+import h11
 import structlog
 
 from secretgate.certs import CertAuthority
@@ -18,29 +20,6 @@ from secretgate.scan import BlockedError, TextScanner
 logger = structlog.get_logger()
 
 MAX_BUFFER_SIZE = 10 * 1024 * 1024  # 10MB
-
-
-def _decode_chunked(data: bytes) -> bytes:
-    """Decode HTTP chunked transfer-encoded bytes into raw body bytes."""
-    result = b""
-    pos = 0
-    while pos < len(data):
-        end = data.find(b"\r\n", pos)
-        if end == -1:
-            break
-        size_str = data[pos:end].split(b";")[0].strip()
-        if not size_str:
-            break
-        try:
-            size = int(size_str, 16)
-        except ValueError:
-            break
-        if size == 0:
-            break
-        pos = end + 2
-        result += data[pos : pos + size]
-        pos += size + 2  # skip trailing \r\n after chunk data
-    return result
 
 
 class ForwardProxyServer:
@@ -310,19 +289,48 @@ class _ConnectionHandler:
                         break
                     body += chunk
             elif "chunked" in req_transfer:
-                # Read all raw chunked data then decode to plain bytes so
+                # Use h11 to decode chunked body into plain bytes so
                 # redaction works on content only (not chunk-size framing) and
                 # so we can switch to Content-Length framing for forwarding.
                 was_chunked = True
-                raw_chunked = body
+                h11_conn = h11.Connection(our_role=h11.SERVER)
+                h11_conn.receive_data(req_header_data)
+
+                body_parts: list[bytes] = []
+                done = False
                 while True:
+                    event = h11_conn.next_event()
+                    if isinstance(event, h11.Request):
+                        continue
+                    elif isinstance(event, h11.Data):
+                        body_parts.append(bytes(event.data))
+                    elif isinstance(event, h11.EndOfMessage):
+                        done = True
+                        break
+                    elif event is h11.NEED_DATA:
+                        break
+                    else:
+                        break
+
+                while not done:
                     chunk = await client_reader.read(65536)
                     if not chunk:
                         break
-                    raw_chunked += chunk
-                    if b"\r\n0\r\n\r\n" in raw_chunked or raw_chunked.endswith(b"0\r\n\r\n"):
-                        break
-                body = _decode_chunked(raw_chunked)
+                    h11_conn.receive_data(chunk)
+                    while True:
+                        event = h11_conn.next_event()
+                        if isinstance(event, h11.Data):
+                            body_parts.append(bytes(event.data))
+                        elif isinstance(event, h11.EndOfMessage):
+                            done = True
+                            break
+                        elif event is h11.NEED_DATA:
+                            break
+                        else:
+                            done = True
+                            break
+
+                body = b"".join(body_parts)
                 content_length = len(body)
             else:
                 content_length = len(body)
@@ -354,8 +362,6 @@ class _ConnectionHandler:
             # Update headers if body was modified or chunked encoding was decoded
             new_body_len = len(scanned_body)
             if was_chunked or (new_body_len != content_length and content_length > 0):
-                import re
-
                 headers_text = headers_bytes.decode("latin-1")
                 if was_chunked:
                     # Remove Transfer-Encoding: chunked — body is now plain bytes
@@ -460,21 +466,61 @@ class _ConnectionHandler:
                     await client_writer.drain()
                     sent += len(chunk)
             elif "chunked" in transfer_encoding:
-                # Stream chunked data through until we see the terminal chunk
-                buf = resp_body_start
-                # Check if the terminal chunk is already in the initial data
-                if not (b"\r\n0\r\n\r\n" in buf or buf.startswith(b"0\r\n\r\n")):
+                # Use h11 to properly detect end of chunked response stream.
+                # h11 tracks chunk framing and emits EndOfMessage at the terminal chunk.
+                resp_conn = h11.Connection(our_role=h11.CLIENT)
+                # Put h11 in the correct state by telling it we "sent" a request
+                method_str = request_line.split(" ", 1)[0]
+                # Only include headers h11 needs for response parsing (host).
+                # Exclude body-framing headers so h11 doesn't expect request body data.
+                skip_headers = {"content-length", "transfer-encoding", "content-type"}
+                h11_headers = [
+                    (k.encode("latin-1"), v.encode("latin-1"))
+                    for k, v in req_headers.items()
+                    if k not in skip_headers
+                ]
+                if "host" not in req_headers:
+                    h11_headers.append((b"host", host.encode("latin-1")))
+                resp_conn.send(
+                    h11.Request(
+                        method=method_str.encode("latin-1"), target=b"/", headers=h11_headers
+                    )
+                )
+                resp_conn.send(h11.EndOfMessage())
+
+                # Feed the response data we already have (headers + any body start)
+                resp_conn.receive_data(resp_header_data)
+                resp_done = False
+                while True:
+                    ev = resp_conn.next_event()
+                    if isinstance(ev, (h11.Response, h11.InformationalResponse, h11.Data)):
+                        continue
+                    elif isinstance(ev, h11.EndOfMessage):
+                        resp_done = True
+                        break
+                    elif ev is h11.NEED_DATA:
+                        break
+                    else:
+                        break
+
+                while not resp_done:
+                    chunk = await upstream_reader.read(65536)
+                    if not chunk:
+                        return
+                    client_writer.write(chunk)
+                    await client_writer.drain()
+                    resp_conn.receive_data(chunk)
                     while True:
-                        chunk = await upstream_reader.read(65536)
-                        if not chunk:
-                            return
-                        client_writer.write(chunk)
-                        await client_writer.drain()
-                        # Check for end of chunked encoding (0\r\n\r\n)
-                        buf = (
-                            buf[-7:] + chunk
-                        )  # keep tail for boundary detection (pattern is 7 bytes)
-                        if b"\r\n0\r\n\r\n" in buf or buf.startswith(b"0\r\n\r\n"):
+                        ev = resp_conn.next_event()
+                        if isinstance(ev, h11.Data):
+                            continue
+                        elif isinstance(ev, h11.EndOfMessage):
+                            resp_done = True
+                            break
+                        elif ev is h11.NEED_DATA:
+                            break
+                        else:
+                            resp_done = True
                             break
             else:
                 # No content-length, no chunked — read until connection close
@@ -567,8 +613,6 @@ class _ConnectionHandler:
 
         # Update Content-Length if body was modified by scanning
         if len(scanned_body) != content_length and content_length > 0:
-            import re
-
             hdr_text = modified_headers.decode("latin-1")
             hdr_text = re.sub(
                 r"(?i)content-length:\s*\d+",

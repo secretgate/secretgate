@@ -26,6 +26,7 @@ dependencies = [
     "structlog>=24.0",
     "cryptography>=42.0",
     "certifi>=2024.0",
+    "h11>=0.14",
 ]
 
 [project.urls]
