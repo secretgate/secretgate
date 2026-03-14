@@ -462,16 +462,20 @@ class _ConnectionHandler:
             elif "chunked" in transfer_encoding:
                 # Stream chunked data through until we see the terminal chunk
                 buf = resp_body_start
-                while True:
-                    chunk = await upstream_reader.read(65536)
-                    if not chunk:
-                        return
-                    client_writer.write(chunk)
-                    await client_writer.drain()
-                    # Check for end of chunked encoding (0\r\n\r\n)
-                    buf = buf[-7:] + chunk  # keep tail for boundary detection (pattern is 7 bytes)
-                    if b"\r\n0\r\n\r\n" in buf or buf.startswith(b"0\r\n\r\n"):
-                        break
+                # Check if the terminal chunk is already in the initial data
+                if not (b"\r\n0\r\n\r\n" in buf or buf.startswith(b"0\r\n\r\n")):
+                    while True:
+                        chunk = await upstream_reader.read(65536)
+                        if not chunk:
+                            return
+                        client_writer.write(chunk)
+                        await client_writer.drain()
+                        # Check for end of chunked encoding (0\r\n\r\n)
+                        buf = (
+                            buf[-7:] + chunk
+                        )  # keep tail for boundary detection (pattern is 7 bytes)
+                        if b"\r\n0\r\n\r\n" in buf or buf.startswith(b"0\r\n\r\n"):
+                            break
             else:
                 # No content-length, no chunked — read until connection close
                 try:
