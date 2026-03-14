@@ -117,6 +117,7 @@ class _ConnectionHandler:
 
         request_line, headers = self._parse_request(header_data)
         if not request_line:
+            await self._send_error(self._writer, 400, "Bad Request", "Malformed HTTP request")
             return
 
         method, target, _ = request_line.split(" ", 2)
@@ -135,6 +136,12 @@ class _ConnectionHandler:
                 return b""
             buf += chunk
             if len(buf) > MAX_BUFFER_SIZE:
+                await self._send_error(
+                    self._writer,
+                    413,
+                    "Request Entity Too Large",
+                    "Request headers exceed maximum buffer size",
+                )
                 return b""
         return buf
 
@@ -298,6 +305,7 @@ class _ConnectionHandler:
 
             request_line, req_headers = self._parse_request(req_header_data)
             if not request_line:
+                await self._send_error(client_writer, 400, "Bad Request", "Malformed HTTP request")
                 return
 
             # Read the request body
