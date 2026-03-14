@@ -31,6 +31,14 @@ Lean security proxy for AI coding tools — scans and redacts secrets before the
 - **Placeholders**: `REDACTED<aws-access-key:a1b2c3d4e5f6>` — deterministic (same secret = same placeholder), self-documenting type identifier + truncated SHA-256 hash
 - **Deduplication**: scanner deduplicates matches by value; redactor does a second pass `result.replace()` to catch repeated occurrences
 
+## Branch strategy
+
+- `main` is protected — all changes go through PRs with at least 1 approving review
+- Squash merge only — each PR becomes a single commit on `main`
+- Feature branches: `feat/...`, `fix/...`, `chore/...`
+- Feature branches are auto-deleted after merge
+- Never push directly to `main`
+
 ## Development
 
 ```bash

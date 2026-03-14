@@ -325,7 +325,28 @@ Drop patterns in `~/.secretgate/signatures.yaml` or pass `--signatures /path/to/
     - Database URL: "myco_db://.*@prod\\.mycompany\\.com"
 ```
 
-## Development
+## Contributing
+
+We welcome contributions! Here's how we work:
+
+### Branch strategy
+
+- **`main`** is the production branch — always deployable, published to PyPI
+- All changes go through **feature branches** and **pull requests**
+- Branch naming: `feat/...`, `fix/...`, `chore/...`
+- PRs require **1 approving review** before merging
+- **Squash merge only** — keeps `main` history clean (one commit per PR)
+- Feature branches are auto-deleted after merge
+
+### Workflow
+
+1. Create a feature branch from `main`
+2. Make your changes, ensure tests pass (`pytest tests/ -v`) and lint is clean (`ruff check src/ tests/`)
+3. Open a PR against `main`
+4. Get a review, address feedback
+5. Maintainer squash-merges once approved
+
+### Development setup
 
 ```bash
 git clone https://github.com/secretgate/secretgate.git
@@ -341,7 +362,7 @@ pytest tests/ -v
 ruff check src/ tests/
 ```
 
-## Pre-commit hooks
+### Pre-commit hooks
 
 secretgate includes pre-commit hooks for development. After `pip install -e ".[dev]"`:
 
