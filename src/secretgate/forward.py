@@ -243,6 +243,25 @@ class _ConnectionHandler:
         except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
             pass
 
+    @staticmethod
+    async def _send_error(
+        writer: asyncio.StreamWriter, status: int, reason: str, body: str
+    ) -> None:
+        """Send an HTTP error response to the client."""
+        body_bytes = body.encode()
+        response = (
+            f"HTTP/1.1 {status} {reason}\r\n"
+            f"Content-Type: text/plain\r\n"
+            f"Content-Length: {len(body_bytes)}\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+        ).encode() + body_bytes
+        try:
+            writer.write(response)
+            await writer.drain()
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            pass  # client already gone
+
     async def _relay_http(
         self,
         client_reader: asyncio.StreamReader,
@@ -263,6 +282,13 @@ class _ConnectionHandler:
                     return
                 req_header_data += chunk
                 if len(req_header_data) > MAX_BUFFER_SIZE:
+                    logger.warning("forward_request_headers_too_large", host=host)
+                    await self._send_error(
+                        client_writer,
+                        413,
+                        "Request Entity Too Large",
+                        "Request headers exceed maximum buffer size",
+                    )
                     return
 
             # Split headers from any body data that was read
@@ -397,6 +423,12 @@ class _ConnectionHandler:
                     )
                 except Exception as exc:
                     logger.warning("forward_upstream_reconnect_failed", host=host, error=str(exc))
+                    await self._send_error(
+                        client_writer,
+                        502,
+                        "Bad Gateway",
+                        "Failed to reconnect to upstream server",
+                    )
                     return
                 upstream_writer.write(headers_bytes + scanned_body)
                 await upstream_writer.drain()
@@ -422,6 +454,12 @@ class _ConnectionHandler:
                                 ssl=_ssl,
                             )
                         except Exception:
+                            await self._send_error(
+                                client_writer,
+                                502,
+                                "Bad Gateway",
+                                "Failed to reconnect to upstream server",
+                            )
                             return
                         # Resend the request on the new connection
                         upstream_writer.write(headers_bytes + scanned_body)
@@ -429,9 +467,23 @@ class _ConnectionHandler:
                         resp_header_data = b""
                         reconnected = True
                         continue
+                    logger.warning("forward_upstream_eof", host=host)
+                    await self._send_error(
+                        client_writer,
+                        502,
+                        "Bad Gateway",
+                        "Upstream server closed connection without responding",
+                    )
                     return
                 resp_header_data += chunk
                 if len(resp_header_data) > MAX_BUFFER_SIZE:
+                    logger.warning("forward_response_headers_too_large", host=host)
+                    await self._send_error(
+                        client_writer,
+                        502,
+                        "Bad Gateway",
+                        "Upstream response headers exceed maximum buffer size",
+                    )
                     return
 
             resp_header_end = resp_header_data.index(b"\r\n\r\n") + 4
