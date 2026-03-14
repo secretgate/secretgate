@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import datetime
 import ipaddress
+import os
 import ssl
+import tempfile
 from pathlib import Path
 
 import structlog
@@ -57,6 +59,42 @@ def _san_for_domain(domain: str) -> list[x509.GeneralName]:
         return [x509.IPAddress(addr)]
     except ValueError:
         return [x509.DNSName(domain)]
+
+
+def _load_cert_chain_from_memory(ctx: ssl.SSLContext, cert_pem: bytes, key_pem: bytes) -> None:
+    """Load a cert chain and private key into an SSLContext without writing to disk.
+
+    Uses memfd_create (Linux) for anonymous in-memory files that never touch
+    the filesystem. Falls back to temp files on other platforms.
+    """
+    if hasattr(os, "memfd_create"):
+        cert_fd = os.memfd_create("domain_cert")
+        key_fd = os.memfd_create("domain_key")
+        try:
+            os.write(cert_fd, cert_pem)
+            os.write(key_fd, key_pem)
+            ctx.load_cert_chain(f"/proc/self/fd/{cert_fd}", f"/proc/self/fd/{key_fd}")
+        finally:
+            os.close(cert_fd)
+            os.close(key_fd)
+    else:
+        # Fallback for macOS/Windows: use temp files with restricted permissions
+        cert_path = key_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as cert_f:
+                cert_f.write(cert_pem)
+                cert_path = cert_f.name
+            os.chmod(cert_path, 0o600)
+            with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as key_f:
+                key_f.write(key_pem)
+                key_path = key_f.name
+            os.chmod(key_path, 0o600)
+            ctx.load_cert_chain(cert_path, key_path)
+        finally:
+            if cert_path:
+                Path(cert_path).unlink(missing_ok=True)
+            if key_path:
+                Path(key_path).unlink(missing_ok=True)
 
 
 class CertAuthority:
@@ -212,26 +250,16 @@ class CertAuthority:
         )
 
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        # Load cert chain (domain cert + CA cert) and private key from memory
-        import tempfile
 
-        with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as cert_f:
-            cert_f.write(domain_cert.public_bytes(serialization.Encoding.PEM))
-            cert_f.write(self._ca_cert.public_bytes(serialization.Encoding.PEM))
-            cert_path = cert_f.name
-        with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as key_f:
-            key_f.write(
-                domain_key.private_bytes(
-                    serialization.Encoding.PEM,
-                    serialization.PrivateFormat.TraditionalOpenSSL,
-                    serialization.NoEncryption(),
-                )
-            )
-            key_path = key_f.name
-
-        ctx.load_cert_chain(cert_path, key_path)
-        Path(cert_path).unlink()
-        Path(key_path).unlink()
+        cert_pem = domain_cert.public_bytes(
+            serialization.Encoding.PEM
+        ) + self._ca_cert.public_bytes(serialization.Encoding.PEM)
+        key_pem = domain_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+        _load_cert_chain_from_memory(ctx, cert_pem, key_pem)
 
         self._domain_cache[domain] = (ctx, now + datetime.timedelta(hours=_DOMAIN_VALID_HOURS))
         return ctx
