@@ -21,6 +21,21 @@ logger = structlog.get_logger()
 
 MAX_BUFFER_SIZE = 10 * 1024 * 1024  # 10MB
 
+# Paths that should never be scanned — auth/token endpoints contain
+# credentials (JWTs, refresh tokens) that would be redacted and break
+# authentication flows like OAuth token refresh.
+_AUTH_PATH_PATTERNS = re.compile(
+    r"(?:"
+    r"/oauth(?:/|$)"  # /oauth/ or /oauth at end
+    r"|/auth(?:/|$)"  # /auth/ or /auth at end
+    r"|/token(?:/|$|\?)"  # /token, /token/, /token?...
+    r"|/authorize(?:/|$|\?)"  # /authorize, /authorize/, /authorize?...
+    r"|/\.well-known/"  # /.well-known/openid-configuration etc.
+    r"|/login"  # /login endpoints
+    r")",
+    re.IGNORECASE,
+)
+
 
 class ForwardProxyServer:
     """Wraps asyncio.Server with active task tracking for clean shutdown."""
@@ -107,6 +122,11 @@ class _ConnectionHandler:
         self._scanner = scanner
         self._passthrough = passthrough_domains
         self._upstream_ssl = upstream_ssl
+
+    @staticmethod
+    def _is_auth_path(path: str) -> bool:
+        """Return True if the request path is an auth/token endpoint that should skip scanning."""
+        return bool(_AUTH_PATH_PATTERNS.search(path))
 
     async def run(self) -> None:
         """Read the initial request and dispatch."""
@@ -369,10 +389,15 @@ class _ConnectionHandler:
             else:
                 content_length = len(body)
 
-            # Scan outbound request body
+            # Scan outbound request body (skip auth endpoints to avoid
+            # redacting OAuth tokens / refresh tokens)
+            req_path = request_line.split(" ", 2)[1] if request_line else ""
             content_type = req_headers.get("content-type", "application/octet-stream")
             scanned_body = body
-            if body and content_length > 0:
+            skip_scan = self._is_auth_path(req_path)
+            if skip_scan:
+                logger.debug("forward_skip_auth_path", host=host, path=req_path)
+            if body and content_length > 0 and not skip_scan:
                 try:
                     scanned_body, alerts = self._scanner.scan_body(body, content_type)
                     for alert in alerts:
@@ -649,10 +674,14 @@ class _ConnectionHandler:
                 break
             body += chunk
 
-        # Scan body
+        # Scan body (skip auth endpoints to avoid redacting OAuth tokens)
+        req_path = parsed.path or "/"
         content_type = headers.get("content-type", "application/octet-stream")
         scanned_body = body
-        if body and content_length > 0:
+        skip_scan = self._is_auth_path(req_path)
+        if skip_scan:
+            logger.debug("forward_skip_auth_path", host=host, path=req_path)
+        if body and content_length > 0 and not skip_scan:
             try:
                 scanned_body, alerts = self._scanner.scan_body(body, content_type)
                 for alert in alerts:
