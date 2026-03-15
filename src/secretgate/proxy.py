@@ -38,6 +38,8 @@ def create_provider_router(
     @router.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def proxy(request: Request, path: str):
         upstream_url = f"{provider.base_url.rstrip('/')}/{path}"
+        if request.url.query:
+            upstream_url = f"{upstream_url}?{request.url.query}"
 
         # Forward headers, replacing host
         headers = dict(request.headers)
