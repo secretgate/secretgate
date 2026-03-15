@@ -373,6 +373,14 @@ pre-commit install
 This enables ruff lint/format, trailing whitespace fixes, and secretgate's own
 secret scanner on staged files.
 
+## Releasing
+
+Releases are published to [PyPI](https://pypi.org/project/secretgate/) automatically via GitHub Actions using [trusted publishing](https://docs.pypi.org/trusted-publishers/) (no API tokens needed).
+
+1. Bump the version in `pyproject.toml`
+2. Create a [GitHub Release](https://github.com/secretgate/secretgate/releases/new) with tag `vX.Y.Z`
+3. The `publish.yml` workflow builds and uploads to PyPI
+
 ## License
 
 Apache 2.0
