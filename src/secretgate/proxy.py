@@ -18,6 +18,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from secretgate.config import ProviderConfig
+from secretgate.forward import _AUTH_PATH_PATTERNS
 from secretgate.pipeline import Pipeline, PipelineContext
 
 if TYPE_CHECKING:
@@ -43,9 +44,11 @@ def create_provider_router(
         headers.pop("host", None)
         headers.pop("content-length", None)
 
-        # For non-JSON or GET requests, pass through directly
-        if request.method == "GET" or "application/json" not in request.headers.get(
-            "content-type", ""
+        # For non-JSON, GET, or auth/token endpoints, pass through directly
+        if (
+            request.method == "GET"
+            or "application/json" not in request.headers.get("content-type", "")
+            or _AUTH_PATH_PATTERNS.search(f"/{path}")
         ):
             return await _passthrough(request, upstream_url, headers, state.http_client)
 

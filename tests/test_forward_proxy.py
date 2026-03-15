@@ -8,7 +8,7 @@ import ssl
 import pytest
 
 from secretgate.certs import CertAuthority
-from secretgate.forward import start_forward_proxy
+from secretgate.forward import _ConnectionHandler, start_forward_proxy
 from secretgate.scan import TextScanner
 from secretgate.secrets.scanner import SecretScanner
 
@@ -450,6 +450,119 @@ class TestChunkedEncoding:
             # Verify the body content is present (may span chunk boundaries)
             assert b"hello chu" in inner_response
             assert b"nked world" in inner_response
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
+
+
+class TestAuthPathSkip:
+    """Auth/token endpoints should skip scanning to avoid redacting OAuth tokens."""
+
+    def test_is_auth_path_matches(self):
+        assert _ConnectionHandler._is_auth_path("/oauth/token") is True
+        assert _ConnectionHandler._is_auth_path("/v1/oauth/token") is True
+        assert _ConnectionHandler._is_auth_path("/auth/refresh") is True
+        assert _ConnectionHandler._is_auth_path("/v1/auth/callback") is True
+        assert _ConnectionHandler._is_auth_path("/token") is True
+        assert _ConnectionHandler._is_auth_path("/api/token") is True
+        assert _ConnectionHandler._is_auth_path("/authorize") is True
+        assert _ConnectionHandler._is_auth_path("/.well-known/openid-configuration") is True
+        assert _ConnectionHandler._is_auth_path("/login") is True
+
+    def test_is_auth_path_no_match(self):
+        assert _ConnectionHandler._is_auth_path("/v1/messages") is False
+        assert _ConnectionHandler._is_auth_path("/v1/chat/completions") is False
+        assert _ConnectionHandler._is_auth_path("/v1/embeddings") is False
+        assert _ConnectionHandler._is_auth_path("/health") is False
+        assert _ConnectionHandler._is_auth_path("/") is False
+
+    async def test_auth_path_not_scanned_in_tunnel(self, ca, proxy_server):
+        """Secrets in auth endpoint requests should pass through unredacted."""
+        _, port = proxy_server
+
+        echo_server = await _run_echo_https_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+
+            connect_req = (
+                f"CONNECT 127.0.0.1:{echo_port} HTTP/1.1\r\nHost: 127.0.0.1:{echo_port}\r\n\r\n"
+            )
+            writer.write(connect_req.encode())
+            await writer.drain()
+
+            response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 Connection Established" in response
+
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx.load_verify_locations(str(ca.ca_cert_path))
+            await writer.start_tls(ssl_ctx, server_hostname="127.0.0.1")
+
+            # Send a request to an auth endpoint with a JWT (would normally be redacted)
+            jwt = b"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature_here"
+            body = b'{"refresh_token":"' + jwt + b'"}'
+            inner_request = (
+                b"POST /oauth/token HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"\r\n" + body
+            )
+            writer.write(inner_request)
+            await writer.drain()
+
+            inner_response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 OK" in inner_response
+            # The JWT should NOT be redacted — auth paths skip scanning
+            assert jwt in inner_response
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
+
+    async def test_non_auth_path_still_scanned(self, ca, proxy_server):
+        """Secrets in regular API requests should still be redacted."""
+        _, port = proxy_server
+
+        echo_server = await _run_echo_https_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+
+            connect_req = (
+                f"CONNECT 127.0.0.1:{echo_port} HTTP/1.1\r\nHost: 127.0.0.1:{echo_port}\r\n\r\n"
+            )
+            writer.write(connect_req.encode())
+            await writer.drain()
+
+            response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 Connection Established" in response
+
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx.load_verify_locations(str(ca.ca_cert_path))
+            await writer.start_tls(ssl_ctx, server_hostname="127.0.0.1")
+
+            # Send a request to a regular endpoint with a secret
+            body = b"data=AKIAIOSFODNN7EXAMPLE"
+            inner_request = (
+                b"POST /v1/messages HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: application/x-www-form-urlencoded\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"\r\n" + body
+            )
+            writer.write(inner_request)
+            await writer.drain()
+
+            inner_response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 OK" in inner_response
+            # The AWS key should still be redacted on non-auth paths
+            assert b"AKIAIOSFODNN7EXAMPLE" not in inner_response
 
             writer.close()
         finally:
