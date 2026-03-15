@@ -51,10 +51,11 @@ ruff check src/ tests/
 
 ## Publishing
 
-Package is on PyPI as `secretgate`. To release a new version:
+Package is on PyPI as `secretgate`. Releases are automated via GitHub Actions trusted publishing (OIDC, no tokens):
+
 1. Bump version in `pyproject.toml`
-2. `python -m build`
-3. `twine upload dist/*` (or use GitHub Actions trusted publishing)
+2. Create a GitHub Release with tag `vX.Y.Z`
+3. The `publish.yml` workflow builds and uploads to PyPI automatically
 
 ## Forward proxy
 
