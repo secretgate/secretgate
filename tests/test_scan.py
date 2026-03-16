@@ -248,6 +248,74 @@ class TestStripMessagesFormat:
         }
         assert _strip_messages_format(body) is True
 
+    def test_blanks_anthropic_tool_use_input(self):
+        """Anthropic tool_use.input in earlier assistant messages should be blanked."""
+        body = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_01",
+                            "name": "bash",
+                            "input": {"command": "cat /etc/secrets"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_01", "content": "ok"}
+                    ],
+                },
+                {"role": "user", "content": "current question"},
+            ]
+        }
+        _strip_messages_format(body)
+        assert body["messages"][0]["content"][0]["input"] == {}
+
+    def test_blanks_document_source_text(self):
+        """Document block source text in earlier messages should be blanked."""
+        body = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "document",
+                            "source": {"type": "text", "text": "secret content"},
+                        }
+                    ],
+                },
+                {"role": "assistant", "content": "noted"},
+                {"role": "user", "content": "current"},
+            ]
+        }
+        _strip_messages_format(body)
+        assert body["messages"][0]["content"][0]["source"]["text"] == ""
+
+    def test_blanks_server_tool_result_content(self):
+        """Server tool result list content in earlier messages should be blanked."""
+        body = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "code_execution_tool_result",
+                            "tool_use_id": "srvtoolu_01",
+                            "content": [{"type": "text", "text": "output"}],
+                        }
+                    ],
+                },
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "current"},
+            ]
+        }
+        _strip_messages_format(body)
+        assert body["messages"][0]["content"][0]["content"] == []
+
 
 class TestStripGemini:
     """Tests for Google Gemini format stripping."""

@@ -305,10 +305,27 @@ def _blank_message(msg: dict) -> bool:
         for block in content:
             if not isinstance(block, dict):
                 continue
+            # Blank string fields that carry text content
             for key in ("text", "thinking", "signature", "content"):
                 if key in block and isinstance(block[key], str) and block[key]:
                     block[key] = ""
                     modified = True
+            # Blank list content (e.g. tool_result.content, server tool results)
+            for key in ("content",):
+                if key in block and isinstance(block[key], list):
+                    block[key] = []
+                    modified = True
+            # Anthropic tool_use.input — dict field with tool arguments
+            if "input" in block and isinstance(block["input"], dict) and block["input"]:
+                block["input"] = {}
+                modified = True
+            # Anthropic document source — blank text content
+            source = block.get("source")
+            if isinstance(source, dict):
+                for key in ("text", "content"):
+                    if key in source and isinstance(source[key], str) and source[key]:
+                        source[key] = ""
+                        modified = True
 
     # OpenAI tool_calls — blank function arguments
     for tc in msg.get("tool_calls", []):

@@ -430,6 +430,122 @@ async def test_mixed_conversation_selective_scanning():
     assert "REDACTED<" in result["messages"][2]["content"][0]["content"]
 
 
+@pytest.mark.asyncio
+async def test_scans_document_text_source():
+    """Document blocks with text source should be scanned and redacted."""
+    scanner = SecretScanner()
+    step = SecretRedactionStep(scanner, mode="redact")
+    ctx = PipelineContext()
+
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "document",
+                        "source": {"type": "text", "text": f"config: {AWS_KEY}"},
+                    }
+                ],
+            }
+        ]
+    }
+
+    result = await step.process_request(body, ctx)
+    assert result is not None
+    assert ctx.secrets_found >= 1
+    assert AWS_KEY not in result["messages"][0]["content"][0]["source"]["text"]
+
+
+@pytest.mark.asyncio
+async def test_scans_document_content_source():
+    """Document blocks with inline content source should be scanned."""
+    scanner = SecretScanner()
+    step = SecretRedactionStep(scanner, mode="redact")
+    ctx = PipelineContext()
+
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "content",
+                            "content": [{"type": "text", "text": f"secret: {AWS_KEY}"}],
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+
+    result = await step.process_request(body, ctx)
+    assert result is not None
+    assert ctx.secrets_found >= 1
+    sub = result["messages"][0]["content"][0]["source"]["content"][0]
+    assert AWS_KEY not in sub["text"]
+
+
+@pytest.mark.asyncio
+async def test_skips_document_base64_source():
+    """Document blocks with base64 source (PDF) should not be scanned."""
+    scanner = SecretScanner()
+    step = SecretRedactionStep(scanner, mode="redact")
+    ctx = PipelineContext()
+
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": AWS_KEY,
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+
+    result = await step.process_request(body, ctx)
+    assert result is not None
+    assert ctx.secrets_found == 0
+
+
+@pytest.mark.asyncio
+async def test_scans_server_tool_result():
+    """Server tool result blocks (e.g. code_execution_tool_result) should be scanned."""
+    scanner = SecretScanner()
+    step = SecretRedactionStep(scanner, mode="redact")
+    ctx = PipelineContext()
+
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "code_execution_tool_result",
+                        "tool_use_id": "srvtoolu_01",
+                        "content": f"Output: {AWS_KEY}",
+                    }
+                ],
+            }
+        ]
+    }
+
+    result = await step.process_request(body, ctx)
+    assert result is not None
+    assert ctx.secrets_found >= 1
+    assert AWS_KEY not in result["messages"][0]["content"][0]["content"]
+
+
 def test_is_thinking_sse_data():
     assert _is_thinking_sse_data(
         json.dumps(
