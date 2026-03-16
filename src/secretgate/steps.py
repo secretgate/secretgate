@@ -21,7 +21,7 @@ class SecretRedactionStep(PipelineStep):
         self._mode = mode  # "redact", "block", or "audit"
 
     async def process_request(self, body: dict, ctx: PipelineContext) -> dict | None:
-        # First, scan all message text to detect secrets (without mutating)
+        # First, scan scannable text to detect secrets (without mutating)
         all_text = self._extract_text(body)
         matches = self._scanner.scan(all_text)
 
@@ -47,16 +47,20 @@ class SecretRedactionStep(PipelineStep):
 
         # Redact mode: replace secrets with placeholders
         redactor = SecretRedactor(self._scanner)
-        messages = body.get("messages", [])
 
-        for msg in messages:
+        # Redact the system field
+        _redact_system(body, redactor)
+
+        # Redact only scannable message content (user text + tool_result)
+        for msg in body.get("messages", []):
+            role = msg.get("role", "")
+            if role != "user":
+                continue
             content = msg.get("content")
             if isinstance(content, str):
                 msg["content"] = redactor.redact(content)
             elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        block["text"] = redactor.redact(block.get("text", ""))
+                _redact_user_blocks(content, redactor)
 
         ctx.metadata["redactor"] = redactor
         logger.info("secrets_redacted", count=redactor.count)
@@ -64,16 +68,46 @@ class SecretRedactionStep(PipelineStep):
 
     @staticmethod
     def _extract_text(body: dict) -> str:
-        """Extract all text content from messages for scanning."""
+        """Extract scannable text from the request body.
+
+        Content-block-aware extraction:
+        - system field: always scanned (user-supplied)
+        - user text blocks: scanned (most likely leak vector)
+        - user tool_result blocks: scanned (tool output may contain secrets)
+        - assistant messages: skipped (model-generated)
+        - tool_use blocks: skipped (structured function calls)
+        - thinking blocks: skipped (model-internal, cryptographic signatures)
+        - image blocks: skipped (binary data)
+        """
         parts: list[str] = []
+
+        # System field — always user-supplied
+        system = body.get("system")
+        if isinstance(system, str):
+            parts.append(system)
+        elif isinstance(system, list):
+            for block in system:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+
         for msg in body.get("messages", []):
+            role = msg.get("role", "")
+            # Skip assistant messages entirely — model-generated content
+            if role != "user":
+                continue
+
             content = msg.get("content")
             if isinstance(content, str):
                 parts.append(content)
             elif isinstance(content, list):
                 for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = block.get("type", "")
+                    if block_type == "text":
                         parts.append(block.get("text", ""))
+                    elif block_type == "tool_result":
+                        _extract_tool_result_text(block, parts)
         return "\n".join(parts)
 
     async def process_response(self, body: dict, ctx: PipelineContext) -> dict:
@@ -149,6 +183,46 @@ def _unredact_dict(d: dict, redactor: SecretRedactor) -> None:
             d[key] = redactor.unredact(v)
         else:
             _unredact_value(v, redactor)
+
+
+def _extract_tool_result_text(block: dict, parts: list[str]) -> None:
+    """Extract scannable text from a tool_result content block."""
+    content = block.get("content")
+    if isinstance(content, str):
+        parts.append(content)
+    elif isinstance(content, list):
+        for sub in content:
+            if isinstance(sub, dict) and sub.get("type") == "text":
+                parts.append(sub.get("text", ""))
+
+
+def _redact_system(body: dict, redactor: SecretRedactor) -> None:
+    """Redact secrets in the system field."""
+    system = body.get("system")
+    if isinstance(system, str):
+        body["system"] = redactor.redact(system)
+    elif isinstance(system, list):
+        for block in system:
+            if isinstance(block, dict) and block.get("type") == "text":
+                block["text"] = redactor.redact(block.get("text", ""))
+
+
+def _redact_user_blocks(blocks: list, redactor: SecretRedactor) -> None:
+    """Redact secrets in user message content blocks (text + tool_result)."""
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type", "")
+        if block_type == "text":
+            block["text"] = redactor.redact(block.get("text", ""))
+        elif block_type == "tool_result":
+            content = block.get("content")
+            if isinstance(content, str):
+                block["content"] = redactor.redact(content)
+            elif isinstance(content, list):
+                for sub in content:
+                    if isinstance(sub, dict) and sub.get("type") == "text":
+                        sub["text"] = redactor.redact(sub.get("text", ""))
 
 
 class AuditLogStep(PipelineStep):
