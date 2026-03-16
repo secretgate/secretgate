@@ -9,6 +9,7 @@ import pytest
 from secretgate.scan import (
     BlockedError,
     TextScanner,
+    _blank_gemini_part,
     _strip_cohere,
     _strip_gemini,
     _strip_messages_format,
@@ -290,6 +291,86 @@ class TestStripGemini:
         body = {"contents": [{"role": "user", "parts": [{"text": "hello"}]}]}
         assert _strip_gemini(body) is False
 
+    def test_blanks_function_call_args_in_earlier_turn(self):
+        """Model functionCall args in earlier turns should be blanked."""
+        body = {
+            "contents": [
+                {"role": "user", "parts": [{"text": "get weather"}]},
+                {
+                    "role": "model",
+                    "parts": [{"functionCall": {"name": "get_weather", "args": {"city": "Paris"}}}],
+                },
+                {
+                    "role": "user",
+                    "parts": [
+                        {"functionResponse": {"name": "get_weather", "response": {"temp": 22}}}
+                    ],
+                },
+                {"role": "model", "parts": [{"text": "It's 22C"}]},
+                {"role": "user", "parts": [{"text": "current question"}]},
+            ]
+        }
+        _strip_gemini(body)
+        # Earlier model functionCall args blanked
+        assert body["contents"][1]["parts"][0]["functionCall"]["args"] == {}
+        # Earlier user functionResponse blanked
+        assert body["contents"][2]["parts"][0]["functionResponse"]["response"] == {}
+        # Current turn kept
+        assert body["contents"][4]["parts"][0]["text"] == "current question"
+
+    def test_blanks_code_execution_in_earlier_turn(self):
+        """codeExecutionResult and executableCode in earlier turns should be blanked."""
+        body = {
+            "contents": [
+                {
+                    "role": "model",
+                    "parts": [
+                        {"executableCode": {"language": "PYTHON", "code": "print('secret')"}},
+                        {"codeExecutionResult": {"outcome": "OUTCOME_OK", "output": "secret"}},
+                    ],
+                },
+                {"role": "user", "parts": [{"text": "current"}]},
+            ]
+        }
+        _strip_gemini(body)
+        assert body["contents"][0]["parts"][0]["executableCode"]["code"] == ""
+        assert body["contents"][0]["parts"][1]["codeExecutionResult"]["output"] == ""
+        assert body["contents"][1]["parts"][0]["text"] == "current"
+
+
+class TestBlankGeminiPart:
+    """Test the Gemini part blanking helper directly."""
+
+    def test_blanks_text(self):
+        part = {"text": "hello"}
+        assert _blank_gemini_part(part) is True
+        assert part["text"] == ""
+
+    def test_blanks_function_call_args(self):
+        part = {"functionCall": {"name": "fn", "args": {"key": "val"}}}
+        assert _blank_gemini_part(part) is True
+        assert part["functionCall"]["args"] == {}
+
+    def test_blanks_function_response(self):
+        part = {"functionResponse": {"name": "fn", "response": {"result": "data"}}}
+        assert _blank_gemini_part(part) is True
+        assert part["functionResponse"]["response"] == {}
+
+    def test_blanks_code_execution_result(self):
+        part = {"codeExecutionResult": {"outcome": "OUTCOME_OK", "output": "secret"}}
+        assert _blank_gemini_part(part) is True
+        assert part["codeExecutionResult"]["output"] == ""
+
+    def test_blanks_executable_code(self):
+        part = {"executableCode": {"language": "PYTHON", "code": "print(x)"}}
+        assert _blank_gemini_part(part) is True
+        assert part["executableCode"]["code"] == ""
+
+    def test_skips_inline_data(self):
+        """inlineData (binary) should not be modified."""
+        part = {"inlineData": {"mimeType": "image/png", "data": "base64data"}}
+        assert _blank_gemini_part(part) is False
+
 
 class TestStripCohere:
     """Tests for Cohere format stripping."""
@@ -327,6 +408,55 @@ class TestStripCohere:
             "chat_history": [{"role": "USER", "message": "old"}],
         }
         assert _strip_cohere(body) is True
+
+    def test_blanks_tool_results_outputs(self):
+        """Cohere v1 tool_results outputs should be blanked."""
+        body = {
+            "message": "what did the tool say?",
+            "chat_history": [],
+            "tool_results": [
+                {
+                    "call": {"name": "search", "parameters": {"q": "test"}},
+                    "outputs": [{"result": "secret data"}],
+                }
+            ],
+        }
+        _strip_cohere(body)
+        assert body["tool_results"][0]["outputs"] == []
+        assert body["message"] == "what did the tool say?"
+
+
+class TestStripMessagesFormatOpenAI:
+    """Additional OpenAI-specific tests for _strip_messages_format."""
+
+    def test_blanks_developer_role(self):
+        """OpenAI developer role (o1+ models) should be blanked like system."""
+        body = {
+            "messages": [
+                {"role": "developer", "content": "You must follow these rules"},
+                {"role": "user", "content": "current question"},
+            ]
+        }
+        _strip_messages_format(body)
+        assert body["messages"][0]["content"] == ""
+        assert body["messages"][1]["content"] == "current question"
+
+    def test_cohere_v2_handled_as_messages_format(self):
+        """Cohere v2 uses OpenAI-compatible format — should work via _strip_messages_format."""
+        body = {
+            "model": "command-r-plus",
+            "messages": [
+                {"role": "system", "content": "You are helpful"},
+                {"role": "user", "content": "old question"},
+                {"role": "assistant", "content": "old answer"},
+                {"role": "user", "content": "current question"},
+            ],
+        }
+        _strip_messages_format(body)
+        assert body["messages"][0]["content"] == ""
+        assert body["messages"][1]["content"] == ""
+        assert body["messages"][2]["content"] == ""
+        assert body["messages"][3]["content"] == "current question"
 
 
 class TestFormatDetection:

@@ -226,11 +226,11 @@ def _strip_gemini(body: dict) -> bool:
         if i >= last_turn_start:
             continue
 
-        # Blank earlier entries
+        # Blank earlier entries — all part types that may carry text/secrets
         for part in entry.get("parts", []):
-            if isinstance(part, dict) and "text" in part and part["text"]:
-                part["text"] = ""
-                modified = True
+            if not isinstance(part, dict):
+                continue
+            modified = _blank_gemini_part(part) or modified
 
     return modified
 
@@ -254,7 +254,43 @@ def _strip_cohere(body: dict) -> bool:
             entry["message"] = ""
             modified = True
 
+    # Blank tool_results outputs — already processed in previous turns
+    for tr in body.get("tool_results", []):
+        if isinstance(tr, dict) and tr.get("outputs"):
+            tr["outputs"] = []
+            modified = True
+
     # Keep ``message`` (current user input) — it's what we want to scan
+    return modified
+
+
+def _blank_gemini_part(part: dict) -> bool:
+    """Blank scannable content in a Gemini part dict."""
+    modified = False
+    # Text parts
+    if "text" in part and part["text"]:
+        part["text"] = ""
+        modified = True
+    # functionCall — model-generated, may echo secrets in args
+    fc = part.get("functionCall")
+    if isinstance(fc, dict) and fc.get("args"):
+        fc["args"] = {}
+        modified = True
+    # functionResponse — user-supplied function output
+    fr = part.get("functionResponse")
+    if isinstance(fr, dict) and fr.get("response"):
+        fr["response"] = {}
+        modified = True
+    # codeExecutionResult — code output may contain secrets
+    cer = part.get("codeExecutionResult")
+    if isinstance(cer, dict) and cer.get("output"):
+        cer["output"] = ""
+        modified = True
+    # executableCode — model-generated code, may reference secrets
+    ec = part.get("executableCode")
+    if isinstance(ec, dict) and ec.get("code"):
+        ec["code"] = ""
+        modified = True
     return modified
 
 
