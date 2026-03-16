@@ -108,6 +108,12 @@ class SecretRedactionStep(PipelineStep):
                         parts.append(block.get("text", ""))
                     elif block_type == "tool_result":
                         _extract_tool_result_text(block, parts)
+                    elif block_type == "document":
+                        _extract_document_text(block, parts)
+                    elif block_type.endswith("_tool_result"):
+                        # Server tool result blocks (web_search_tool_result,
+                        # code_execution_tool_result, etc.)
+                        _extract_tool_result_text(block, parts)
         return "\n".join(parts)
 
     async def process_response(self, body: dict, ctx: PipelineContext) -> dict:
@@ -185,6 +191,26 @@ def _unredact_dict(d: dict, redactor: SecretRedactor) -> None:
             _unredact_value(v, redactor)
 
 
+def _extract_document_text(block: dict, parts: list[str]) -> None:
+    """Extract scannable text from a document content block."""
+    source = block.get("source")
+    if not isinstance(source, dict):
+        return
+    source_type = source.get("type", "")
+    if source_type == "text":
+        text = source.get("text", "")
+        if text:
+            parts.append(text)
+    elif source_type == "content":
+        content = source.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for sub in content:
+                if isinstance(sub, dict) and sub.get("type") == "text":
+                    parts.append(sub.get("text", ""))
+
+
 def _extract_tool_result_text(block: dict, parts: list[str]) -> None:
     """Extract scannable text from a tool_result content block."""
     content = block.get("content")
@@ -208,21 +234,48 @@ def _redact_system(body: dict, redactor: SecretRedactor) -> None:
 
 
 def _redact_user_blocks(blocks: list, redactor: SecretRedactor) -> None:
-    """Redact secrets in user message content blocks (text + tool_result)."""
+    """Redact secrets in user message content blocks."""
     for block in blocks:
         if not isinstance(block, dict):
             continue
         block_type = block.get("type", "")
         if block_type == "text":
             block["text"] = redactor.redact(block.get("text", ""))
-        elif block_type == "tool_result":
-            content = block.get("content")
-            if isinstance(content, str):
-                block["content"] = redactor.redact(content)
-            elif isinstance(content, list):
-                for sub in content:
-                    if isinstance(sub, dict) and sub.get("type") == "text":
-                        sub["text"] = redactor.redact(sub.get("text", ""))
+        elif block_type == "tool_result" or block_type.endswith("_tool_result"):
+            _redact_tool_result(block, redactor)
+        elif block_type == "document":
+            _redact_document(block, redactor)
+
+
+def _redact_tool_result(block: dict, redactor: SecretRedactor) -> None:
+    """Redact secrets in a tool_result or server tool result block."""
+    content = block.get("content")
+    if isinstance(content, str):
+        block["content"] = redactor.redact(content)
+    elif isinstance(content, list):
+        for sub in content:
+            if isinstance(sub, dict) and sub.get("type") == "text":
+                sub["text"] = redactor.redact(sub.get("text", ""))
+
+
+def _redact_document(block: dict, redactor: SecretRedactor) -> None:
+    """Redact secrets in a document block's text content."""
+    source = block.get("source")
+    if not isinstance(source, dict):
+        return
+    source_type = source.get("type", "")
+    if source_type == "text":
+        if isinstance(source.get("text"), str):
+            source["text"] = redactor.redact(source["text"])
+    elif source_type == "content":
+        # Inline content — string or list of content blocks
+        content = source.get("content")
+        if isinstance(content, str):
+            source["content"] = redactor.redact(content)
+        elif isinstance(content, list):
+            for sub in content:
+                if isinstance(sub, dict) and sub.get("type") == "text":
+                    sub["text"] = redactor.redact(sub.get("text", ""))
 
 
 class AuditLogStep(PipelineStep):

@@ -101,14 +101,13 @@ class TextScanner:
     def _strip_model_content(text: str) -> str:
         """Strip content that should not be scanned from LLM API request JSON.
 
-        Only keeps content that needs scanning:
-        - The last contiguous run of user-role messages (the current turn)
+        Detects the API format and keeps only the last user turn:
+        - Anthropic: ``messages`` + top-level ``system``
+        - OpenAI / Mistral / Azure OpenAI: ``messages`` with ``role: system``
+        - Google Gemini: ``contents`` with ``role: user/model``
+        - Cohere: ``message`` (current input) + ``chat_history``
 
-        Everything else is blanked:
-        - System prompt: static config (CLAUDE.md, tool defs), audit
-          separately with ``secretgate scan``
-        - Assistant messages: model-generated, already scanned on input
-        - Earlier user messages: already scanned when originally sent
+        Falls back to scanning the full body for unrecognized formats.
         """
         try:
             body = json.loads(text)
@@ -118,68 +117,225 @@ class TextScanner:
         if not isinstance(body, dict):
             return text
 
-        # Blank the system prompt — it's static config that doesn't change
-        # between requests and triggers false positives from tool definitions,
-        # CLAUDE.md content, etc.
-        system = body.get("system")
-        if isinstance(system, str) and system:
-            body["system"] = ""
-            modified_system = True
-        elif isinstance(system, list):
-            for block in system:
-                if isinstance(block, dict) and "text" in block and block["text"]:
-                    block["text"] = ""
-            modified_system = True
+        # Detect format and dispatch
+        if "contents" in body and isinstance(body.get("contents"), list):
+            modified = _strip_gemini(body)
+        elif isinstance(body.get("message"), str) and "chat_history" in body:
+            modified = _strip_cohere(body)
+        elif isinstance(body.get("messages"), list):
+            modified = _strip_messages_format(body)
         else:
-            modified_system = False
-
-        messages = body.get("messages")
-        if not isinstance(messages, list):
             return text
 
-        # Find where the last user turn starts: walk backwards from the end
-        # and keep user-role messages until we hit an assistant message.
-        last_turn_start = len(messages)
-        for i in range(len(messages) - 1, -1, -1):
-            msg = messages[i]
-            if isinstance(msg, dict) and msg.get("role") == "user":
-                last_turn_start = i
-            else:
-                break
+        return json.dumps(body) if modified else text
 
-        modified = False
-        for i, msg in enumerate(messages):
-            if not isinstance(msg, dict):
-                continue
 
-            # Keep the last user turn — it's the new content to scan
-            if i >= last_turn_start:
-                # Still strip thinking blocks (signatures must never be touched)
-                content = msg.get("content")
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "thinking":
-                            for key in ("thinking", "signature"):
-                                if key in block and block[key]:
-                                    block[key] = ""
-                                    modified = True
-                continue
+# ---------------------------------------------------------------------------
+# Format-specific stripping helpers
+# ---------------------------------------------------------------------------
 
-            # Blank all earlier messages (already scanned in previous turns)
-            content = msg.get("content")
-            if isinstance(content, str) and content:
-                msg["content"] = ""
+
+def _strip_messages_format(body: dict) -> bool:
+    """Strip non-scannable content from OpenAI/Anthropic/Mistral message format.
+
+    Handles both:
+    - Anthropic: top-level ``system`` field, ``tool_result`` blocks, ``thinking`` blocks
+    - OpenAI / Mistral: ``role: system`` messages, ``role: tool`` messages, ``tool_calls``
+    """
+    modified = False
+
+    # Anthropic top-level system field
+    system = body.get("system")
+    if isinstance(system, str) and system:
+        body["system"] = ""
+        modified = True
+    elif isinstance(system, list):
+        for block in system:
+            if isinstance(block, dict) and "text" in block and block["text"]:
+                block["text"] = ""
                 modified = True
-            elif isinstance(content, list):
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    for key in ("text", "thinking", "signature", "content"):
-                        if key in block and isinstance(block[key], str) and block[key]:
-                            block[key] = ""
-                            modified = True
 
-        return json.dumps(body) if (modified or modified_system) else text
+    messages = body["messages"]
+
+    # Find where the last user turn starts: walk backwards keeping
+    # user-role messages (and OpenAI tool messages that belong to the
+    # same turn) until we hit an assistant/system message.
+    last_turn_start = len(messages)
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if not isinstance(msg, dict):
+            break
+        role = msg.get("role", "")
+        if role in ("user", "tool"):
+            last_turn_start = i
+        else:
+            break
+
+    for i, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+
+        # Keep the last user turn — strip only thinking blocks within it
+        if i >= last_turn_start:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "thinking":
+                        for key in ("thinking", "signature"):
+                            if key in block and block[key]:
+                                block[key] = ""
+                                modified = True
+            continue
+
+        # Blank all earlier messages
+        modified = _blank_message(msg) or modified
+
+    return modified
+
+
+def _strip_gemini(body: dict) -> bool:
+    """Strip non-scannable content from Google Gemini format.
+
+    Gemini uses ``contents`` (list of ``{role, parts}``) and optionally
+    ``systemInstruction`` (``{parts: [{text: ...}]}``).
+    """
+    modified = False
+
+    # Blank systemInstruction
+    si = body.get("systemInstruction")
+    if isinstance(si, dict):
+        for part in si.get("parts", []):
+            if isinstance(part, dict) and "text" in part and part["text"]:
+                part["text"] = ""
+                modified = True
+
+    contents = body["contents"]
+
+    # Find last user turn
+    last_turn_start = len(contents)
+    for i in range(len(contents) - 1, -1, -1):
+        entry = contents[i]
+        if isinstance(entry, dict) and entry.get("role") == "user":
+            last_turn_start = i
+        else:
+            break
+
+    for i, entry in enumerate(contents):
+        if not isinstance(entry, dict):
+            continue
+        if i >= last_turn_start:
+            continue
+
+        # Blank earlier entries — all part types that may carry text/secrets
+        for part in entry.get("parts", []):
+            if not isinstance(part, dict):
+                continue
+            modified = _blank_gemini_part(part) or modified
+
+    return modified
+
+
+def _strip_cohere(body: dict) -> bool:
+    """Strip non-scannable content from Cohere format.
+
+    Cohere uses ``message`` (current user input), ``chat_history``
+    (list of ``{role, message}``), and ``preamble`` (system prompt).
+    """
+    modified = False
+
+    # Blank preamble (system prompt)
+    if body.get("preamble"):
+        body["preamble"] = ""
+        modified = True
+
+    # Blank chat_history — already scanned in previous turns
+    for entry in body.get("chat_history", []):
+        if isinstance(entry, dict) and entry.get("message"):
+            entry["message"] = ""
+            modified = True
+
+    # Blank tool_results outputs — already processed in previous turns
+    for tr in body.get("tool_results", []):
+        if isinstance(tr, dict) and tr.get("outputs"):
+            tr["outputs"] = []
+            modified = True
+
+    # Keep ``message`` (current user input) — it's what we want to scan
+    return modified
+
+
+def _blank_gemini_part(part: dict) -> bool:
+    """Blank scannable content in a Gemini part dict."""
+    modified = False
+    # Text parts
+    if "text" in part and part["text"]:
+        part["text"] = ""
+        modified = True
+    # functionCall — model-generated, may echo secrets in args
+    fc = part.get("functionCall")
+    if isinstance(fc, dict) and fc.get("args"):
+        fc["args"] = {}
+        modified = True
+    # functionResponse — user-supplied function output
+    fr = part.get("functionResponse")
+    if isinstance(fr, dict) and fr.get("response"):
+        fr["response"] = {}
+        modified = True
+    # codeExecutionResult — code output may contain secrets
+    cer = part.get("codeExecutionResult")
+    if isinstance(cer, dict) and cer.get("output"):
+        cer["output"] = ""
+        modified = True
+    # executableCode — model-generated code, may reference secrets
+    ec = part.get("executableCode")
+    if isinstance(ec, dict) and ec.get("code"):
+        ec["code"] = ""
+        modified = True
+    return modified
+
+
+def _blank_message(msg: dict) -> bool:
+    """Blank all text content in a message dict (any format)."""
+    modified = False
+    content = msg.get("content")
+    if isinstance(content, str) and content:
+        msg["content"] = ""
+        modified = True
+    elif isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            # Blank string fields that carry text content
+            for key in ("text", "thinking", "signature", "content"):
+                if key in block and isinstance(block[key], str) and block[key]:
+                    block[key] = ""
+                    modified = True
+            # Blank list content (e.g. tool_result.content, server tool results)
+            for key in ("content",):
+                if key in block and isinstance(block[key], list):
+                    block[key] = []
+                    modified = True
+            # Anthropic tool_use.input — dict field with tool arguments
+            if "input" in block and isinstance(block["input"], dict) and block["input"]:
+                block["input"] = {}
+                modified = True
+            # Anthropic document source — blank text content
+            source = block.get("source")
+            if isinstance(source, dict):
+                for key in ("text", "content"):
+                    if key in source and isinstance(source[key], str) and source[key]:
+                        source[key] = ""
+                        modified = True
+
+    # OpenAI tool_calls — blank function arguments
+    for tc in msg.get("tool_calls", []):
+        if isinstance(tc, dict):
+            fn = tc.get("function", {})
+            if isinstance(fn, dict) and fn.get("arguments"):
+                fn["arguments"] = ""
+                modified = True
+
+    return modified
 
 
 class BlockedError(Exception):
