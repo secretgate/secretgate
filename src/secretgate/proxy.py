@@ -26,6 +26,23 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+# ---------------------------------------------------------------------------
+# SSE helpers
+# ---------------------------------------------------------------------------
+
+
+def _sse_error_termination(error_msg: str) -> bytes:
+    """Build SSE events that gracefully terminate a stream on error.
+
+    Emits Anthropic-style termination events so clients like Claude Code see
+    a clean end-of-stream rather than a broken connection.
+    """
+    events = (
+        f'event: error\ndata: {json.dumps({"type": "error", "error": {"type": "stream_error", "message": error_msg}})}\n\n'
+        "data: [DONE]\n\n"
+    )
+    return events.encode("utf-8")
+
 
 def create_provider_router(
     provider: ProviderConfig,
@@ -149,13 +166,57 @@ async def _forward_streaming(
     client: httpx.AsyncClient,
     pipeline: Pipeline,
     ctx: PipelineContext,
-) -> StreamingResponse:
-    """Forward request and process streaming response chunks through pipeline."""
+) -> StreamingResponse | JSONResponse:
+    """Forward request and process streaming response chunks through pipeline.
+
+    Peeks at the upstream status code before committing to a streaming 200.
+    If the upstream returns an error (non-2xx), the full response is read and
+    returned as a proper HTTP error so clients get a real status code instead
+    of a 200 wrapping an error body.  (Implements #23.)
+    """
 
     async def stream_chunks() -> AsyncIterator[bytes]:
         async with client.stream("POST", url, headers=headers, content=body) as resp:
+            # If upstream returned an error, bail out early — the caller
+            # already handled this via _try_stream_or_error.
             async for chunk in resp.aiter_bytes():
                 processed = await pipeline.run_response_chunk(chunk, ctx)
                 yield processed
 
-    return StreamingResponse(content=stream_chunks(), media_type="text/event-stream")
+    # Open the stream, peek at the status, and decide.
+    req = client.build_request("POST", url, headers=headers, content=body)
+    resp = await client.send(req, stream=True)
+
+    if resp.status_code >= 400:
+        # Drain the body so the connection is released, then return a real error.
+        error_body = await resp.aread()
+        await resp.aclose()
+        try:
+            error_json = json.loads(error_body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            error_json = {"error": error_body.decode("utf-8", errors="replace")}
+        logger.warning(
+            "upstream_stream_error",
+            status=resp.status_code,
+            url=url,
+        )
+        return JSONResponse(content=error_json, status_code=resp.status_code)
+
+    # Happy path — upstream is 2xx, stream through the pipeline.
+    # If an error occurs mid-stream (connection drop, scanning failure, etc.),
+    # emit proper SSE termination events so clients see a clean end instead of
+    # hanging on a broken pipe.  (Implements #18.)
+    async def stream_from_resp() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in resp.aiter_bytes():
+                processed = await pipeline.run_response_chunk(chunk, ctx)
+                yield processed
+        except Exception as exc:
+            logger.error("mid_stream_error", error=str(exc), url=url)
+            # Emit graceful SSE termination so clients (Claude Code, etc.) see
+            # a clean stream end rather than a broken pipe.
+            yield _sse_error_termination(str(exc))
+        finally:
+            await resp.aclose()
+
+    return StreamingResponse(content=stream_from_resp(), media_type="text/event-stream")

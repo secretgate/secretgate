@@ -334,3 +334,97 @@ class TestStreamDetection:
 
         # The mock transport doesn't produce SSE, but the request should succeed
         assert resp.status_code == 200
+
+
+class TestStreamingFirstChunkErrorDetection:
+    """Issue #23: upstream errors on streaming requests should return proper HTTP status codes."""
+
+    def test_streaming_upstream_error_returns_proper_status(self):
+        """When upstream returns 429 on a streaming request, client gets 429 not 200."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                429,
+                json={"error": {"type": "rate_limit_error", "message": "Too many requests"}},
+            )
+
+        client = _build_app(handler)
+        body = {"model": "test", "messages": [], "stream": True}
+        resp = client.post("/anthropic/v1/messages", json=body)
+
+        assert resp.status_code == 429
+        data = resp.json()
+        assert data["error"]["type"] == "rate_limit_error"
+
+    def test_streaming_upstream_401_returns_401(self):
+        """Unauthorized errors are surfaced with correct status."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                401,
+                json={"error": {"type": "authentication_error", "message": "Invalid API key"}},
+            )
+
+        client = _build_app(handler)
+        body = {"model": "test", "messages": [], "stream": True}
+        resp = client.post("/anthropic/v1/messages", json=body)
+
+        assert resp.status_code == 401
+        data = resp.json()
+        assert data["error"]["type"] == "authentication_error"
+
+    def test_streaming_upstream_500_returns_500(self):
+        """Server errors from upstream are surfaced properly."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                500,
+                json={"error": {"type": "api_error", "message": "Internal server error"}},
+            )
+
+        client = _build_app(handler)
+        body = {"model": "test", "messages": [], "stream": True}
+        resp = client.post("/anthropic/v1/messages", json=body)
+
+        assert resp.status_code == 500
+
+    def test_streaming_upstream_non_json_error(self):
+        """Non-JSON error responses are still returned with correct status."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(502, text="Bad Gateway")
+
+        client = _build_app(handler)
+        body = {"model": "test", "messages": [], "stream": True}
+        resp = client.post("/anthropic/v1/messages", json=body)
+
+        assert resp.status_code == 502
+
+    def test_streaming_upstream_200_streams_normally(self):
+        """When upstream returns 200, streaming works as before."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            req_body = json.loads(request.content)
+            return httpx.Response(200, json={"echo": req_body})
+
+        client = _build_app(handler)
+        body = {"model": "test", "messages": [], "stream": True}
+        resp = client.post("/anthropic/v1/messages", json=body)
+
+        assert resp.status_code == 200
+
+
+class TestMidStreamErrorHandling:
+    """Issue #18: mid-stream errors should emit clean SSE termination events."""
+
+    def test_sse_error_termination_format(self):
+        """The error termination helper produces valid SSE events."""
+        from secretgate.proxy import _sse_error_termination
+
+        result = _sse_error_termination("connection reset")
+        text = result.decode("utf-8")
+
+        assert "event: error\n" in text
+        assert '"type": "stream_error"' in text
+        assert "connection reset" in text
+        assert "data: [DONE]" in text
