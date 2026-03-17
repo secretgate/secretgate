@@ -68,7 +68,7 @@
     - API Key: "gsk_[a-zA-Z0-9]{52}"
 
 - ElevenLabs:
-    - API Key: "sk_[a-f0-9]{32}[a-f0-9]{16}"
+    - API Key: "sk_[a-f0-9]{48}"
 
 - OpenRouter:
     - API Key: "sk-or-v1-[a-f0-9]{64}"
@@ -76,8 +76,8 @@
 - Fireworks AI:
     - API Key: "fw_[a-zA-Z0-9]{40}"
 
-- Deepseek:
-    - API Key: "sk-[a-f0-9]{32}"
+# Deepseek: removed — sk-[a-f0-9]{32} is too broad (collides with OpenAI, Anthropic sk-ant-, sk-proj-).
+# Deepseek keys use the generic sk- prefix with no distinguishing format; re-add if a unique prefix emerges.
 
 
 # --- Source Control ---
