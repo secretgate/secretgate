@@ -149,7 +149,9 @@ class TestWrapLogging:
         # Mock the subprocess to avoid actually starting a server
         with patch("subprocess.Popen") as mock_popen, patch(
             "subprocess.run"
-        ) as mock_run, patch("secretgate.cli._find_available_port", return_value=19999):
+        ) as mock_run, patch(
+            "secretgate.cli._find_available_port", side_effect=[19999, 20000]
+        ):
             proc = MagicMock()
             proc.poll.return_value = None
             proc.pid = 12345
@@ -199,7 +201,9 @@ class TestWrapLogging:
 
         with patch("subprocess.Popen") as mock_popen, patch(
             "subprocess.run"
-        ) as mock_run, patch("secretgate.cli._find_available_port", return_value=19998):
+        ) as mock_run, patch(
+            "secretgate.cli._find_available_port", side_effect=[19998, 19999]
+        ):
             proc = MagicMock()
             proc.poll.return_value = None
             proc.pid = 12345

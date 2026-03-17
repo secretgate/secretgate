@@ -4,8 +4,6 @@
 [![Python](https://img.shields.io/pypi/pyversions/secretgate)](https://pypi.org/project/secretgate/)
 [![License](https://img.shields.io/github/license/secretgate/secretgate)](https://github.com/secretgate/secretgate/blob/main/LICENSE)
 [![CI](https://github.com/secretgate/secretgate/actions/workflows/ci.yml/badge.svg)](https://github.com/secretgate/secretgate/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-76%20passed-brightgreen)](https://github.com/secretgate/secretgate/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/secretgate/secretgate/branch/main/graph/badge.svg)](https://codecov.io/gh/secretgate/secretgate)
 
 AI coding agents are powerful — but they have shell access, and one wrong
 `curl`, `git push`, or API call can leak your secrets. You shouldn't have to
