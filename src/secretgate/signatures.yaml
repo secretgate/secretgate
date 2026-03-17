@@ -12,6 +12,7 @@
     - AWS Secret Key: "(?i)['\"]?aws_secret_access_key['\"]?\\s*[=:]\\s*['\"]?([A-Za-z0-9/+=]{40})['\"]?"
     - AWS MWS Token: "amzn\\.mws\\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
     - AWS AppSync API Key: "da2-[a-z0-9]{26}"
+    - AWS Bedrock API Key: "\\bABSK[A-Za-z0-9+/]{109,269}={0,2}"
 
 - Google:
     - GCP API Key: "AIza[0-9A-Za-z\\-_]{35}"
@@ -92,6 +93,8 @@
     - Personal Access Token: "glpat-[0-9a-zA-Z\\-_]{20}"
     - Pipeline Token: "glptt-[0-9a-f]{40}"
     - Runner Token: "glrt-[0-9a-zA-Z\\-_]{20}"
+    - OAuth App Secret: "gloas-[0-9a-zA-Z_\\-]{64}"
+    - Runner Registration Token: "GR1348941[a-zA-Z0-9_-]{20}"
 
 # --- Messaging / Communication ---
 
@@ -103,6 +106,7 @@
 
 - Discord:
     - Bot Token: "[MNO][a-zA-Z0-9_-]{23,25}\\.[a-zA-Z0-9_-]{6}\\.[a-zA-Z0-9_-]{27,}"
+    - Webhook URL: "https://discord\\.com/api/webhooks/[0-9]{18}/[0-9a-zA-Z-]{68}"
 
 - Telegram:
     - Bot API Token: "[0-9]{5,16}:A[a-zA-Z0-9_-]{34}"
@@ -110,21 +114,37 @@
 - Microsoft Teams:
     - Webhook URL: "https://[a-z0-9]+\\.webhook\\.office\\.com/webhookb2/[a-z0-9-]+@[a-z0-9-]+/IncomingWebhook/[a-z0-9]+/[a-z0-9-]+"
 
+- Zapier:
+    - Webhook URL: "https://hooks\\.zapier\\.com/hooks/catch/[A-Za-z0-9/]{16}"
+
 # --- Payments / Finance ---
 
 - Stripe:
     - Secret Key: "sk_live_[0-9a-zA-Z]{24,}"
     - Publishable Key: "pk_live_[0-9a-zA-Z]{24,}"
     - Restricted Key: "rk_live_[0-9a-zA-Z]{24,}"
+    - Test Secret Key: "sk_test_[0-9a-zA-Z]{24,}"
+    - Test Restricted Key: "rk_test_[0-9a-zA-Z]{24,}"
 
 - Square:
     - Access Token: "sq0atp-[a-zA-Z0-9_-]{22,60}"
+    - OAuth Secret: "sq0csp-[0-9A-Za-z\\-_]{43}"
 
 - Plaid:
     - Access Token: "access-(?:sandbox|development|production)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 
 - Flutterwave:
-    - Secret Key: "FLWSECK_TEST-[a-h0-9]{32}-X"
+    - Test Secret Key: "FLWSECK_TEST-[a-h0-9]{32}-X"
+    - Production Secret Key: "FLWSECK-[0-9a-z]{32}-X"
+
+- Braintree:
+    - Access Token: "access_token\\$production\\$[0-9a-z]{16}\\$[0-9a-f]{32}"
+
+- Razorpay:
+    - API Key: "\\brzp_\\w{2,6}_\\w{10,20}\\b"
+
+- Paystack:
+    - Secret Key: "\\bsk_[a-z]+_[A-Za-z0-9]{40}\\b"
 
 # --- DevOps / CI/CD ---
 
@@ -140,6 +160,9 @@
 
 - RubyGems:
     - API Token: "rubygems_[a-f0-9]{48}"
+
+- Clojars:
+    - API Token: "(?i)CLOJARS_[a-z0-9]{60}"
 
 - Postman:
     - API Token: "PMAK-[a-f0-9]{24}-[a-f0-9]{34}"
@@ -178,6 +201,12 @@
 - Supabase:
     - Service Key: "sbp_[a-f0-9]{40}"
 
+- Scalingo:
+    - API Token: "\\btk-us-[a-zA-Z0-9_-]{48}\\b"
+
+- Infracost:
+    - API Token: "\\bico-[a-zA-Z0-9]{32}\\b"
+
 # --- Monitoring / Observability ---
 
 - Grafana:
@@ -186,8 +215,12 @@
 
 - New Relic:
     - User API Key: "NRAK-[a-z0-9]{27}"
+    - Admin API Key: "NRAA-[a-f0-9]{27}"
+    - REST API Key: "NRRA-[a-f0-9]{42}"
     - Insert Key: "NRII-[a-z0-9-]{32}"
+    - Insights Query Key: "NRIQ-[A-Za-z0-9\\-_]{32}"
     - Browser API Token: "NRJS-[a-f0-9]{19}"
+    - Synthetics Location Key: "NRSP-[a-z]{2}[0-9]{2}[a-f0-9]{31}"
 
 - Sentry:
     - Org Token: "sntrys_eyJpYXQiO[a-zA-Z0-9+/]{60,400}={0,2}_[a-zA-Z0-9+/]{43}"
@@ -224,6 +257,7 @@
 
 - Notion:
     - API Token: "ntn_[0-9]{11}[A-Za-z0-9]{35}"
+    - Integration Secret: "\\bsecret_[A-Za-z0-9]{43}\\b"
 
 - Linear:
     - API Key: "lin_api_[a-zA-Z0-9]{40}"
@@ -249,6 +283,7 @@
 
 - 1Password:
     - Service Account Token: "ops_eyJ[a-zA-Z0-9+/]{250,}={0,3}"
+    - Secret Key: "\\bA3-[A-Z0-9]{6}-(?:(?:[A-Z0-9]{11})|(?:[A-Z0-9]{6}-[A-Z0-9]{5}))-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}\\b"
 
 - Age:
     - Secret Key: "AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}"
@@ -259,6 +294,59 @@
     - API Key: "AKCp[A-Za-z0-9]{69}"
     - Reference Token: "cmVmd[A-Za-z0-9]{59}"
 
+# --- Additional Services ---
+
+- Adafruit:
+    - IO Key: "\\baio_[a-zA-Z0-9]{28}\\b"
+
+- Apify:
+    - API Token: "\\bapify_api_[a-zA-Z0-9-]{36}\\b"
+
+- Clickhouse:
+    - Cloud API Secret Key: "\\b4b1d[A-Za-z0-9]{38}\\b"
+
+- Cloudinary:
+    - Connection URL: "cloudinary://[0-9]+:[A-Za-z0-9\\-_.]+@[A-Za-z0-9\\-_.]+"
+
+- Dropbox:
+    - Access Token: "\\bsl\\.[A-Za-z0-9\\-_]{130,140}\\b"
+
+- Facebook:
+    - Access Token: "EAACEdEose0cBA[0-9A-Za-z]+"
+
+- Fleetbase:
+    - API Key: "\\bflb_live_[0-9a-zA-Z]{20}\\b"
+
+- Frame.io:
+    - Token: "\\bfio-u-[0-9a-zA-Z_-]{64}\\b"
+
+- MaxMind:
+    - License Key: "\\b[A-Za-z0-9]{6}_[A-Za-z0-9]{29}_mmk\\b"
+
+- PostHog:
+    - Project API Key: "\\bphc_[a-zA-Z0-9_]{43}\\b"
+
+- Prefect:
+    - API Token: "\\bpnu_[a-zA-Z0-9]{36}\\b"
+
+- PubNub:
+    - Subscribe Key: "\\bsub-c-[0-9a-z]{8}-[a-z]{4}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{12}\\b"
+    - Publish Key: "\\bpub-c-[0-9a-z]{8}-[0-9a-z]{4}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{12}\\b"
+
+- Readme:
+    - API Token: "\\brdme_[a-z0-9]{70}\\b"
+
+- Settlemint:
+    - Application Access Token: "\\bsm_aat_[a-zA-Z0-9]{16}\\b"
+    - Personal Access Token: "\\bsm_pat_[a-zA-Z0-9]{16}\\b"
+    - Service Access Token: "\\bsm_sat_[a-zA-Z0-9]{16}\\b"
+
+- Shippo:
+    - API Token: "\\bshippo_(?:live|test)_[a-fA-F0-9]{40}\\b"
+
+- Ubidots:
+    - Token: "\\bBBFF-[0-9a-zA-Z]{30}\\b"
+
 # --- Database Connection Strings ---
 
 - Database:
@@ -266,6 +354,7 @@
     - PostgreSQL Connection String: "postgres(?:ql)?://[^\\s'\"/:]+:[^\\s'\"@]+@[^\\s'\"]{5,}"
     - MySQL Connection String: "mysql://[^\\s'\"/:]+:[^\\s'\"@]+@[^\\s'\"]{5,}"
     - Redis Connection String: "rediss?://[^\\s'\"/:]+:[^\\s'\"@]+@[^\\s'\"]{5,}"
+    - JDBC Connection String: "jdbc:[a-z:]+://[A-Za-z0-9.\\-_:;=/@?,&]+"
 
 # --- Generic Patterns ---
 
