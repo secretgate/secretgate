@@ -202,8 +202,20 @@ def _find_available_port(preferred: int, max_attempts: int = 20) -> int:
     default="redact",
     help="How to handle detected secrets",
 )
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    help="Also stream proxy logs to stderr (always writes to log file)",
+)
+@click.option(
+    "--log-file",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Log file path (default: ~/.secretgate/wrap.log)",
+)
 @click.pass_context
-def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
+def wrap(ctx, forward_proxy_port: int, port: int, mode: str, verbose: bool, log_file: Path | None):
     """Run a command with all traffic routed through secretgate.
 
     Starts the forward proxy in the background, sets proxy env vars,
@@ -214,7 +226,8 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         secretgate wrap -- claude
         secretgate wrap -- curl https://example.com
         secretgate wrap --mode audit -- bash
-        secretgate wrap -- git push
+        secretgate wrap -v -- claude
+        secretgate wrap --log-file /tmp/sg.log -- bash
     """
     import atexit
     import os
@@ -224,6 +237,13 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
     import time
 
     from secretgate.certs import CertAuthority
+
+    # Resolve log file path
+    if log_file is None:
+        log_file = Path(os.environ.get("SECRETGATE_LOG_FILE", "")) or (
+            Path.home() / ".secretgate" / "wrap.log"
+        )
+    log_file.parent.mkdir(parents=True, exist_ok=True)
 
     # Get command from remaining args, strip leading "--"
     command = ctx.args
@@ -270,6 +290,9 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         if secretgate_bin != sys.executable
         else [sys.executable, "-m", "secretgate", "serve"]
     )
+    log_fh = open(log_file, "a")  # noqa: SIM115
+    click.echo(f"Logs: {log_file}")
+
     server_proc = subprocess.Popen(
         [
             *server_cmd,
@@ -280,8 +303,8 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
             "--mode",
             mode,
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        stdout=log_fh,
+        stderr=log_fh,
         **popen_kwargs,
     )
 
@@ -294,6 +317,10 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
             except subprocess.TimeoutExpired:
                 server_proc.kill()
                 server_proc.wait(timeout=2)
+        try:
+            log_fh.close()
+        except Exception:
+            pass
 
     atexit.register(_cleanup_server)
 
@@ -301,9 +328,11 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
     for _ in range(50):
         # Check if the server process died early
         if server_proc.poll() is not None:
-            stderr_out = (
-                server_proc.stderr.read().decode(errors="replace") if server_proc.stderr else ""
-            )
+            log_fh.flush()
+            try:
+                stderr_out = log_file.read_text(errors="replace")
+            except Exception:
+                stderr_out = ""
             click.echo(
                 f"Error: secretgate exited unexpectedly (code {server_proc.returncode})", err=True
             )
@@ -325,6 +354,30 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         return
 
     click.echo(f"secretgate running (PID {server_proc.pid})")
+
+    # In verbose mode, tail the log file to stderr in a background thread
+    _tail_stop = None
+    if verbose:
+        import threading
+
+        _tail_stop = threading.Event()
+
+        def _tail_log():
+            try:
+                with open(log_file) as f:
+                    # Seek to end — only show new output
+                    f.seek(0, 2)
+                    while not _tail_stop.is_set():
+                        line = f.readline()
+                        if line:
+                            click.echo(line, nl=False, err=True)
+                        else:
+                            _tail_stop.wait(0.2)
+            except Exception:
+                pass
+
+        tail_thread = threading.Thread(target=_tail_log, daemon=True)
+        tail_thread.start()
 
     # Run the command with proxy env vars
     env = os.environ.copy()
@@ -348,6 +401,8 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
     except KeyboardInterrupt:
         pass
     finally:
+        if _tail_stop is not None:
+            _tail_stop.set()
         _cleanup_server()
         click.echo("secretgate stopped.")
 
