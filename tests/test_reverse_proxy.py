@@ -334,3 +334,35 @@ class TestStreamDetection:
 
         # The mock transport doesn't produce SSE, but the request should succeed
         assert resp.status_code == 200
+
+
+class TestStreamingErrorHandling:
+    """Test graceful error handling during streaming responses (Issue #18)."""
+
+    def test_streaming_error_emits_sse_termination(self):
+        """When upstream errors mid-stream, emit SSE error + [DONE] events."""
+
+        class FailingTransport(httpx.BaseTransport):
+            def handle_request(self, request):
+                raise httpx.ConnectError("upstream connection dropped")
+
+        provider = ProviderConfig(name="anthropic", base_url="https://api.anthropic.com")
+        pipeline = Pipeline(steps=[PassthroughStep()])
+        state = AppState()
+        state.http_client = httpx.AsyncClient(transport=FailingTransport())
+
+        from fastapi import FastAPI
+        from starlette.testclient import TestClient as StarletteClient
+
+        app = FastAPI()
+        router = create_provider_router(provider, pipeline, state)
+        app.include_router(router)
+
+        client = StarletteClient(app)
+        body = {"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True}
+        resp = client.post("/anthropic/v1/messages", json=body)
+
+        # The response should still be 200 (streaming started) but contain error events
+        assert resp.status_code == 200
+        text = resp.text
+        assert "proxy_error" in text or "[DONE]" in text

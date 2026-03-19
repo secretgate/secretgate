@@ -202,8 +202,20 @@ def _find_available_port(preferred: int, max_attempts: int = 20) -> int:
     default="redact",
     help="How to handle detected secrets",
 )
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    help="Stream proxy logs to stderr in addition to the log file",
+)
+@click.option(
+    "--log-file",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Log file path (default: ~/.secretgate/wrap.log, or $SECRETGATE_LOG_FILE)",
+)
 @click.pass_context
-def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
+def wrap(ctx, forward_proxy_port: int, port: int, mode: str, verbose: bool, log_file: Path | None):
     """Run a command with all traffic routed through secretgate.
 
     Starts the forward proxy in the background, sets proxy env vars,
@@ -256,6 +268,16 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         f"Starting secretgate (port {port}, forward proxy {forward_proxy_port}, mode {mode})..."
     )
 
+    # Resolve log file path
+    if log_file is None:
+        log_file = Path(os.environ.get("SECRETGATE_LOG_FILE", ""))
+        if not str(log_file) or str(log_file) == ".":
+            log_file = Path.home() / ".secretgate" / "wrap.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_fh = open(log_file, "a")  # noqa: SIM115
+
+    click.echo(f"Log file: {log_file}")
+
     # On Windows, create a new process group so we can kill the entire tree
     popen_kwargs = {}
     if sys.platform == "win32":
@@ -280,10 +302,28 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
             "--mode",
             mode,
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT if not verbose else subprocess.PIPE,
         **popen_kwargs,
     )
+
+    # If verbose, tee stderr to both log file and stderr in a background thread
+    tee_thread = None
+    if verbose and server_proc.stderr:
+        import threading
+
+        def _tee_stderr():
+            try:
+                for line in server_proc.stderr:
+                    sys.stderr.buffer.write(line)
+                    sys.stderr.buffer.flush()
+                    log_fh.write(line.decode("utf-8", errors="replace"))
+                    log_fh.flush()
+            except (ValueError, OSError):
+                pass  # log file or stderr closed
+
+        tee_thread = threading.Thread(target=_tee_stderr, daemon=True)
+        tee_thread.start()
 
     def _cleanup_server():
         """Kill the server process — registered with atexit for robustness."""
@@ -294,6 +334,7 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
             except subprocess.TimeoutExpired:
                 server_proc.kill()
                 server_proc.wait(timeout=2)
+        log_fh.close()
 
     atexit.register(_cleanup_server)
 

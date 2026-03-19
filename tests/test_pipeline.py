@@ -566,3 +566,26 @@ def test_is_thinking_sse_data():
         json.dumps({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "x"}})
     )
     assert not _is_thinking_sse_data("[DONE]")
+
+
+class TestWrapLogFileOption:
+    """Test that the wrap command accepts --log-file and --verbose options (Issue #1)."""
+
+    def test_wrap_command_has_log_file_option(self):
+        """The wrap command should accept --log-file and --verbose options."""
+        from secretgate.cli import wrap
+
+        # Verify the params exist on the command
+        param_names = [p.name for p in wrap.params]
+        assert "log_file" in param_names
+        assert "verbose" in param_names
+
+    def test_wrap_help_mentions_log_file(self):
+        """The --help output should mention the log file option."""
+        from click.testing import CliRunner
+        from secretgate.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["wrap", "--help"])
+        assert "--log-file" in result.output
+        assert "--verbose" in result.output

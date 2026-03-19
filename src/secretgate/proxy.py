@@ -153,9 +153,20 @@ async def _forward_streaming(
     """Forward request and process streaming response chunks through pipeline."""
 
     async def stream_chunks() -> AsyncIterator[bytes]:
-        async with client.stream("POST", url, headers=headers, content=body) as resp:
-            async for chunk in resp.aiter_bytes():
-                processed = await pipeline.run_response_chunk(chunk, ctx)
-                yield processed
+        try:
+            async with client.stream("POST", url, headers=headers, content=body) as resp:
+                async for chunk in resp.aiter_bytes():
+                    processed = await pipeline.run_response_chunk(chunk, ctx)
+                    yield processed
+        except Exception as exc:
+            logger.error("streaming_error", error=str(exc), url=url)
+            # Emit SSE error termination so clients (e.g. Claude Code) see a
+            # clean stream end rather than a broken pipe.
+            error_events = (
+                'event: error\ndata: {"type": "error", "error": {"type": "proxy_error",'
+                ' "message": "secretgate: upstream connection error"}}\n\n'
+                "data: [DONE]\n\n"
+            )
+            yield error_events.encode("utf-8")
 
     return StreamingResponse(content=stream_chunks(), media_type="text/event-stream")
