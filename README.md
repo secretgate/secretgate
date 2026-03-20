@@ -35,6 +35,9 @@ IDE / CLI / Agent (e.g. Claude Code)
 │  ┌────────────────────────────────┐  │
 │  │  Secret Scanner (~90 regexes) │  │
 │  ├────────────────────────────────┤  │
+│  │  Known-Value Scanner          │  │
+│  │  (env vars + secret files)    │  │
+│  ├────────────────────────────────┤  │
 │  │  Modes: redact / block / audit│  │
 │  ├────────────────────────────────┤  │
 │  │  Audit Logger                 │  │
@@ -280,6 +283,54 @@ proxy for a real security boundary.
 | `redact` | Replace secrets with placeholders, restore on response | Production use |
 | `block` | Reject requests containing secrets (HTTP 403) | Strict environments |
 | `audit` | Log secrets but forward request unchanged | Testing, evaluation |
+
+## Known-value scanning
+
+Regex patterns catch secrets by **shape** (e.g. `AKIA...` for AWS keys). But what
+about custom tokens, internal API keys, or secrets pasted without context? secretgate
+also detects secrets by **known value** — harvesting actual secrets from your
+environment at startup and scanning for literal matches.
+
+**How it works:**
+
+1. At startup, secretgate collects secret values from:
+   - **Environment variables** whose names contain keywords like `KEY`, `SECRET`, `TOKEN`, `PASSWORD`, etc.
+   - **Secret files** configured via `secret_files` in the config (`.env`, `.json`, `.toml`, `.ini`, or plain text)
+2. Values are filtered by minimum length (8 chars) and entropy (2.5 bits) to skip non-secrets
+3. An index is built for fast matching (Aho-Corasick if `pyahocorasick` is installed, otherwise naive string search)
+4. On every request, text is scanned for literal occurrences of these known values
+
+Regex matches always take priority — if a secret is already caught by a regex pattern,
+the known-value scanner won't duplicate it.
+
+**Install with fast matching:**
+
+```bash
+pip install secretgate[ahocorasick]
+```
+
+**Configure via YAML:**
+
+```yaml
+known_values:
+  scan_env: true
+  secret_files:
+    - /path/to/.env
+    - /path/to/secrets.json
+  min_length: 8
+  entropy_threshold: 2.5
+```
+
+**Disable if needed:**
+
+```bash
+secretgate serve --no-known-values
+secretgate scan --no-known-values
+# or via env var:
+export SECRETGATE_KNOWN_VALUES=false
+```
+
+For full details on how it works, see [docs/known-value-scanning.md](docs/known-value-scanning.md).
 
 ## Extra detection with detect-secrets
 

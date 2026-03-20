@@ -14,14 +14,18 @@ Lean security proxy for AI coding tools — scans and redacts secrets before the
   - `steps.py` — `SecretRedactionStep` (scan + redact) and `AuditLogStep`
   - `cli.py` — Click CLI (`serve`, `scan`, and `ca` commands)
   - `config.py` — Config with env var overrides (prefix `SECRETGATE_`)
-  - `secrets/scanner.py` — regex patterns from YAML + Shannon entropy analysis
+  - `secrets/scanner.py` — regex patterns from YAML + Shannon entropy analysis + known-value integration
   - `secrets/redactor.py` — deterministic `REDACTED<slug:hash12>` placeholders via SHA-256
+  - `secrets/known_values.py` — known-value scanning: harvest env vars/files at startup, Aho-Corasick or naive matching
   - `secrets/detect_secrets_adapter.py` — optional Yelp detect-secrets integration (regex plugins only)
   - `signatures.yaml` — ~90 regex patterns (AWS, GCP, GitHub, Slack, OpenAI, Anthropic, Stripe, etc.)
 - `scripts/` — helper scripts
   - `setup.sh` — one-time setup (install CA, trust instructions, shell config)
   - `with-secretgate.sh` — standalone wrapper (starts proxy, runs command, stops proxy)
-- `tests/` — pytest test suite (56 tests)
+- `docs/` — documentation
+  - `supported-patterns.md` — full list of regex patterns
+  - `known-value-scanning.md` — detailed explanation of known-value detection
+- `tests/` — pytest test suite
 - `.github/workflows/ci.yml` — matrix CI across Python 3.11–3.13
 
 ## Key patterns
@@ -30,6 +34,7 @@ Lean security proxy for AI coding tools — scans and redacts secrets before the
 - **Pipeline**: steps run sequentially on request, reversed on response; `SecretRedactionStep` scans first without mutating, then redacts only in `redact` mode
 - **Placeholders**: `REDACTED<aws-access-key:a1b2c3d4e5f6>` — deterministic (same secret = same placeholder), self-documenting type identifier + truncated SHA-256 hash
 - **Deduplication**: scanner deduplicates matches by value; redactor does a second pass `result.replace()` to catch repeated occurrences
+- **Known-value scanning**: harvests actual secret values from env vars (filtered by name keywords + entropy) and config files at startup; scans via Aho-Corasick (optional `pyahocorasick`) or naive string matching; regex matches always take priority via shared `seen` set
 
 ## Branch strategy
 
@@ -88,3 +93,5 @@ The forward proxy (`--forward-proxy-port 8083`) intercepts all HTTPS traffic via
 - SSH git remotes (`git@github.com:...`) bypass HTTP proxy — only HTTPS remotes intercepted
 - Node.js apps need `NODE_EXTRA_CA_CERTS` env var to trust the CA
 - Scanner uses capture group(1) when available in regex patterns — allows patterns like AWS Secret Key to extract just the secret value, not the surrounding key name
+- Known-value scanning is enabled by default; disable with `--no-known-values` or `SECRETGATE_KNOWN_VALUES=false`
+- `pyahocorasick` is an optional dependency for faster known-value matching; falls back to naive string search
