@@ -29,11 +29,25 @@ def create_app(config: Config) -> FastAPI:
     """Build the FastAPI application."""
     state = AppState()
 
+    # Convert config to HarvestConfig for known-value scanning
+    kv_harvest_config = None
+    if config.enable_known_values:
+        from secretgate.secrets.known_values import HarvestConfig
+
+        kv_harvest_config = HarvestConfig(
+            scan_env=config.known_values.scan_env,
+            secret_files=config.known_values.secret_files,
+            min_length=config.known_values.min_length,
+            entropy_threshold=config.known_values.entropy_threshold,
+        )
+
     # Build the scanner early so it can be shared with the forward proxy
     scanner = SecretScanner(
         signatures_path=config.signatures_path,
         entropy_threshold=config.entropy_threshold,
         use_detect_secrets=config.use_detect_secrets,
+        enable_known_values=config.enable_known_values,
+        known_values_config=kv_harvest_config,
     )
 
     @asynccontextmanager
@@ -55,6 +69,8 @@ def create_app(config: Config) -> FastAPI:
                 entropy_threshold=config.entropy_threshold,
                 use_detect_secrets=config.use_detect_secrets,
                 enable_entropy=False,
+                enable_known_values=config.enable_known_values,
+                known_values_config=kv_harvest_config,
             )
             text_scanner = TextScanner(forward_scanner, mode=config.mode)
             forward_server = await start_forward_proxy(
@@ -78,6 +94,9 @@ def create_app(config: Config) -> FastAPI:
             forward_server.close()
             await forward_server.wait_closed()
         await state.http_client.aclose()
+        # Clean up known-value scanners
+        if scanner._known_value_scanner:
+            scanner._known_value_scanner.clear()
         logger.info("secretgate_stopped")
 
     app = FastAPI(
