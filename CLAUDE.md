@@ -9,7 +9,8 @@ Lean security proxy for AI coding tools — scans and redacts secrets before the
   - `proxy.py` — reverse proxy core (JSON parsing, pipeline execution, streaming/buffered forwarding)
   - `forward.py` — forward proxy with TLS MITM (`asyncio.Server`, CONNECT tunnels, HTTP scanning)
   - `certs.py` — CA cert generation, per-domain cert caching for TLS MITM
-  - `scan.py` — raw text/bytes scanning adapter (wraps `SecretScanner` for forward proxy)
+  - `scan.py` — raw text/bytes scanning adapter (wraps `SecretScanner` for forward proxy, routes git packfiles)
+  - `packfile.py` — git packfile parser: extracts text from commit/blob/tag objects for secret scanning
   - `pipeline.py` — pluggable `PipelineStep` / `Pipeline` / `PipelineContext` abstraction
   - `steps.py` — `SecretRedactionStep` (scan + redact) and `AuditLogStep`
   - `cli.py` — Click CLI (`serve`, `scan`, and `ca` commands)
@@ -74,12 +75,14 @@ The forward proxy (`--forward-proxy-port 8083`) intercepts all HTTPS traffic via
 - `passthrough_domains` config skips MITM for specified domains
 - Supports chunked transfer encoding and streaming responses (SSE)
 - `secretgate wrap -- <command>` starts proxy, sets env vars, runs command, stops proxy on exit
+- **Git packfile scanning**: `git push` sends data as binary packfiles (zlib-compressed objects); secretgate parses these, extracts text from commit/blob/tag objects, and scans for secrets. Redact mode falls back to block (can't safely rewrite packfile binaries). Delta objects are skipped. Safety limits: 1MB per object, 10MB total decompressed.
 
 ### Tested with
 
 - **Claude Code** — all LLM API traffic (api.anthropic.com) intercepted and scanned via CONNECT tunnel, secrets detected in conversation messages (audit + redact modes)
 - **curl to httpbin.org** — HTTPS POST with AWS keys (access key ID + secret access key) detected and redacted through the MITM tunnel
-- Other HTTPS tools (git, pip, npm) should work since they all use standard HTTP proxy env vars, but have not been manually verified yet
+- **git push** — packfile content (blobs, commits, tags) is parsed and scanned for secrets; pushes containing secrets are blocked
+- Other HTTPS tools (pip, npm) should work since they all use standard HTTP proxy env vars, but have not been manually verified yet
 - **localhost traffic** bypasses proxy by default (standard HTTP proxy behavior) — use `no_proxy=""` to override
 - **Platforms**: tested on Linux (Ubuntu/WSL2) and Windows; macOS should work but not yet verified
 
@@ -95,3 +98,4 @@ The forward proxy (`--forward-proxy-port 8083`) intercepts all HTTPS traffic via
 - Scanner uses capture group(1) when available in regex patterns — allows patterns like AWS Secret Key to extract just the secret value, not the surrounding key name
 - Known-value scanning is enabled by default; disable with `--no-known-values` or `SECRETGATE_KNOWN_VALUES=false`
 - `pyahocorasick` is an optional dependency for faster known-value matching; falls back to naive string search
+- Git packfile scanning: `application/x-git-receive-pack-request` content type is routed to the packfile parser instead of the text scanner; redact mode falls back to block since packfile binaries can't be safely rewritten without corrupting checksums/delta chains
