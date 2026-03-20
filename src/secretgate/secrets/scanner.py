@@ -42,11 +42,14 @@ class SecretScanner:
         entropy_threshold: float = 4.0,
         use_detect_secrets: bool = False,
         enable_entropy: bool = True,
+        enable_known_values: bool = False,
+        known_values_config: object | None = None,
     ):
         self._entropy_threshold = entropy_threshold
         self._enable_entropy = enable_entropy
         self._patterns: list[_CompiledPattern] = []
         self._use_detect_secrets = use_detect_secrets
+        self._known_value_scanner = None
 
         if use_detect_secrets:
             from secretgate.secrets.detect_secrets_adapter import is_available
@@ -56,6 +59,11 @@ class SecretScanner:
                     "detect-secrets is not installed. "
                     "Install it with: pip install secretgate[detect-secrets]"
                 )
+
+        if enable_known_values:
+            from secretgate.secrets.known_values import KnownValueScanner
+
+            self._known_value_scanner = KnownValueScanner(known_values_config)
 
         path = signatures_path or Path(__file__).parent.parent / "signatures.yaml"
         self._load_patterns(path)
@@ -127,6 +135,13 @@ class SecretScanner:
                 if dm.value not in seen:
                     seen.add(dm.value)
                     matches.append(dm)
+
+        # Known-value scanning (regex matches take priority via seen set)
+        if self._known_value_scanner:
+            for km in self._known_value_scanner.scan(text):
+                if km.value not in seen:
+                    seen.add(km.value)
+                    matches.append(km)
 
         return matches
 

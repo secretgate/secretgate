@@ -55,6 +55,11 @@ def main():
     default=None,
     help="Directory for CA certs (default: ~/.secretgate/certs)",
 )
+@click.option(
+    "--no-known-values",
+    is_flag=True,
+    help="Disable known-value secret scanning (env var / file harvesting)",
+)
 def serve(
     port: int,
     host: str,
@@ -66,6 +71,7 @@ def serve(
     use_detect_secrets: bool,
     forward_proxy_port: int | None,
     certs_dir: Path | None,
+    no_known_values: bool,
 ):
     """Start the secretgate proxy server."""
     from secretgate.config import Config
@@ -100,6 +106,8 @@ def serve(
         cfg.forward_proxy_port = forward_proxy_port
     if certs_dir is not None:
         cfg.certs_dir = certs_dir
+    if no_known_values:
+        cfg.enable_known_values = False
 
     app = create_app(cfg)
     uvicorn.run(app, host=cfg.host, port=cfg.port, log_level=log_level)
@@ -117,8 +125,13 @@ def serve(
     is_flag=True,
     help="Disable entropy-based detection (reduces false positives)",
 )
+@click.option(
+    "--no-known-values",
+    is_flag=True,
+    help="Disable known-value secret scanning (env var / file harvesting)",
+)
 @click.argument("files", nargs=-1, type=click.Path(exists=True))
-def scan(use_detect_secrets: bool, no_entropy: bool, files: tuple[str, ...]):
+def scan(use_detect_secrets: bool, no_entropy: bool, no_known_values: bool, files: tuple[str, ...]):
     """Scan files or stdin for secrets.
 
     Pass file paths as arguments, or pipe text via stdin.
@@ -136,6 +149,7 @@ def scan(use_detect_secrets: bool, no_entropy: bool, files: tuple[str, ...]):
     scanner = SecretScanner(
         use_detect_secrets=use_detect_secrets,
         enable_entropy=not no_entropy,
+        enable_known_values=not no_known_values,
     )
     total_matches = []
 

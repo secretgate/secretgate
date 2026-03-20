@@ -35,6 +35,9 @@ Repository = "https://github.com/secretgate/secretgate"
 Issues = "https://github.com/secretgate/secretgate/issues"
 
 [project.optional-dependencies]
+ahocorasick = [
+    "pyahocorasick>=2.0",
+]
 detect-secrets = [
     "detect-secrets>=1.4",
 ]
