@@ -10,6 +10,7 @@ import json
 
 import structlog
 
+from secretgate.packfile import PACK_MAGIC, extract_texts_from_packfile
 from secretgate.secrets.redactor import _make_placeholder
 from secretgate.secrets.scanner import SecretScanner
 
@@ -29,6 +30,14 @@ _SKIP_TYPES = frozenset(
     }
 )
 
+# Git packfile content types — binary but contain scannable objects
+_GIT_PACK_TYPES = frozenset(
+    {
+        "application/x-git-receive-pack-request",
+        "application/x-git-upload-pack-request",
+    }
+)
+
 
 class TextScanner:
     """Scan raw HTTP bodies for secrets using the existing SecretScanner."""
@@ -40,11 +49,66 @@ class TextScanner:
     def should_scan(self, content_type: str) -> bool:
         """Return True if this content type should be scanned for secrets."""
         ct = content_type.lower().split(";")[0].strip()
+        # Git packfile types are binary but contain scannable objects
+        if ct in _GIT_PACK_TYPES:
+            return True
         if any(ct.startswith(p) for p in _SKIP_PREFIXES):
             return False
         if ct in _SKIP_TYPES:
             return False
         return True
+
+    def _is_git_packfile(self, body: bytes, content_type: str) -> bool:
+        """Return True if this request is a git packfile."""
+        ct = content_type.lower().split(";")[0].strip()
+        if ct in _GIT_PACK_TYPES:
+            return True
+        # Also detect by PACK magic in the body (could be generic octet-stream)
+        return PACK_MAGIC in body[:8192]  # only check first 8KB for the magic
+
+    def scan_packfile(self, body: bytes) -> tuple[bytes, list[str]]:
+        """Scan a git packfile for secrets.
+
+        Extracts text from commit, blob, and tag objects and scans each.
+        In audit mode: logs alerts, returns body unchanged.
+        In block/redact mode: raises BlockedError (packfiles cannot be safely
+        rewritten without corrupting checksums and delta chains).
+        """
+        alerts: list[str] = []
+        texts = extract_texts_from_packfile(body)
+
+        if not texts:
+            return body, alerts
+
+        all_matches = []
+        for text in texts:
+            matches = self._scanner.scan(text)
+            all_matches.extend(matches)
+
+        if not all_matches:
+            return body, alerts
+
+        for m in all_matches:
+            alert = f"Secret detected in git packfile: {m.service}/{m.pattern_name} on line {m.line_number}"
+            alerts.append(alert)
+            logger.warning(
+                "packfile_secret_detected",
+                service=m.service,
+                pattern=m.pattern_name,
+                line=m.line_number,
+            )
+
+        if self._mode == "audit":
+            return body, alerts
+
+        # Block and redact modes both block — we cannot safely rewrite
+        # individual objects inside a packfile without recomputing checksums
+        # and potentially breaking delta chains.
+        secret_list = "; ".join(f"{m.service}/{m.pattern_name}" for m in all_matches)
+        raise BlockedError(
+            f"Git push blocked: {len(all_matches)} secret(s) detected in packfile ({secret_list})",
+            alerts,
+        )
 
     def scan_body(self, body: bytes, content_type: str = "text/plain") -> tuple[bytes, list[str]]:
         """Scan body bytes for secrets. Returns (possibly modified body, alerts).
@@ -57,6 +121,10 @@ class TextScanner:
 
         if not body or not self.should_scan(content_type):
             return body, alerts
+
+        # Route git packfiles to the packfile scanner
+        if self._is_git_packfile(body, content_type):
+            return self.scan_packfile(body)
 
         try:
             text = body.decode("utf-8", errors="replace")
