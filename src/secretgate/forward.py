@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import re
 import ssl
+import sys
 from urllib.parse import urlparse
 
 import h11
@@ -35,6 +36,73 @@ _AUTH_PATH_PATTERNS = re.compile(
     r")",
     re.IGNORECASE,
 )
+
+
+def _print_block_notice(message: str, alerts: list[str], host: str) -> None:
+    """Print a block notice directly to stderr so it's visible to the user."""
+    lines = [
+        "",
+        f"  [secretgate] BLOCKED request to {host}",
+        f"  {message}",
+    ]
+    for alert in alerts:
+        lines.append(f"    - {alert}")
+    lines.append("")
+    print("\n".join(lines), file=sys.stderr, flush=True)
+
+
+def _pkt_line(data: bytes) -> bytes:
+    """Encode data as a git pkt-line (4-hex-digit length prefix including itself)."""
+    length = len(data) + 4
+    return f"{length:04x}".encode() + data
+
+
+def _build_git_receive_pack_error(body: bytes, error_msg: str) -> bytes | None:
+    """Build a git receive-pack report-status error response.
+
+    Parses the ref name from the pkt-line prefix of the request body and
+    returns a valid report-status response that git will display to the user.
+    Returns None if we can't parse the ref name.
+    """
+    # Extract ref name from the pkt-line section before PACK
+    # Format: <old-sha> <new-sha> <refname>\0<capabilities>\n
+    try:
+        # Find the first pkt-line with a ref update
+        pack_idx = body.find(b"PACK")
+        if pack_idx < 0:
+            return None
+        pkt_section = body[:pack_idx]
+        # Decode and find lines with ref names
+        text = pkt_section.decode("latin-1")
+        ref_name = None
+        for line in text.split("\n"):
+            # Skip pkt-line length prefixes (first 4 chars are hex length)
+            content = line[4:] if len(line) > 4 else line
+            # Strip null byte and capabilities
+            content = content.split("\x00")[0].strip()
+            parts = content.split()
+            if len(parts) >= 3 and parts[2].startswith("refs/"):
+                ref_name = parts[2]
+                break
+        if not ref_name:
+            return None
+    except Exception:
+        return None
+
+    # Build report-status response using sideband-64k (band 1 for pack data)
+    # First send error message on sideband 2 (progress/error)
+    err_text = f"[secretgate] {error_msg}\n".encode()
+    sideband_err = _pkt_line(b"\x02" + err_text)
+
+    # Then send report-status on sideband 1
+    unpack_line = _pkt_line(b"unpack ok\n")
+    ng_msg = f"ng {ref_name} secretgate: secrets detected in push\n".encode()
+    ng_line = _pkt_line(ng_msg)
+    flush = b"0000"
+    report = unpack_line + ng_line + flush
+    sideband_report = _pkt_line(b"\x01" + report)
+
+    return sideband_err + sideband_report + flush
 
 
 class ForwardProxyServer:
@@ -403,17 +471,35 @@ class _ConnectionHandler:
                     for alert in alerts:
                         logger.warning("forward_proxy_alert", host=host, alert=alert)
                 except BlockedError as exc:
-                    # Send a 403 back to the client
+                    # Send error back to the client
                     for alert in exc.alerts:
                         logger.error("forward_proxy_blocked", host=host, alert=alert)
-                    error_body = b"Request blocked by secretgate: secrets detected in outbound data"
-                    response = (
-                        b"HTTP/1.1 403 Forbidden\r\n"
-                        b"Content-Type: text/plain\r\n"
-                        b"Content-Length: " + str(len(error_body)).encode() + b"\r\n"
-                        b"Connection: close\r\n"
-                        b"\r\n" + error_body
-                    )
+                    error_msg = str(exc)
+                    _print_block_notice(error_msg, exc.alerts, host)
+
+                    # For git push: return a git protocol response so git
+                    # displays our error message to the user
+                    git_response = _build_git_receive_pack_error(body, error_msg)
+                    if git_response is not None and "git-receive-pack" in content_type:
+                        response = (
+                            b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: application/x-git-receive-pack-result\r\n"
+                            b"Content-Length: " + str(len(git_response)).encode() + b"\r\n"
+                            b"Connection: close\r\n"
+                            b"\r\n" + git_response
+                        )
+                    else:
+                        error_body = (
+                            f"[secretgate] {error_msg}\n"
+                            f"Details:\n" + "\n".join(f"  - {a}" for a in exc.alerts) + "\n"
+                        ).encode()
+                        response = (
+                            b"HTTP/1.1 403 Forbidden\r\n"
+                            b"Content-Type: text/plain\r\n"
+                            b"Content-Length: " + str(len(error_body)).encode() + b"\r\n"
+                            b"Connection: close\r\n"
+                            b"\r\n" + error_body
+                        )
                     client_writer.write(response)
                     await client_writer.drain()
                     return
@@ -689,7 +775,12 @@ class _ConnectionHandler:
             except BlockedError as exc:
                 for alert in exc.alerts:
                     logger.error("forward_proxy_blocked", host=host, alert=alert)
-                error_body = b"Request blocked by secretgate: secrets detected in outbound data"
+                error_msg = str(exc)
+                _print_block_notice(error_msg, exc.alerts, host)
+                error_body = (
+                    f"[secretgate] {error_msg}\n"
+                    f"Details:\n" + "\n".join(f"  - {a}" for a in exc.alerts) + "\n"
+                ).encode()
                 response = (
                     b"HTTP/1.1 403 Forbidden\r\n"
                     b"Content-Type: text/plain\r\n"

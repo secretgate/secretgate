@@ -293,9 +293,11 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
             str(forward_proxy_port),
             "--mode",
             mode,
+            "--log-level",
+            "warning",
         ],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        stderr=None,  # pass through so block/alert messages are visible
         **popen_kwargs,
     )
 
@@ -315,14 +317,9 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
     for _ in range(50):
         # Check if the server process died early
         if server_proc.poll() is not None:
-            stderr_out = (
-                server_proc.stderr.read().decode(errors="replace") if server_proc.stderr else ""
-            )
             click.echo(
                 f"Error: secretgate exited unexpectedly (code {server_proc.returncode})", err=True
             )
-            if stderr_out:
-                click.echo(stderr_out[-500:], err=True)
             return
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
