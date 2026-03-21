@@ -149,13 +149,53 @@ async def _forward_streaming(
     client: httpx.AsyncClient,
     pipeline: Pipeline,
     ctx: PipelineContext,
-) -> StreamingResponse:
-    """Forward request and process streaming response chunks through pipeline."""
+) -> StreamingResponse | JSONResponse:
+    """Forward request and process streaming response chunks through pipeline.
+
+    Peeks at the upstream HTTP status before starting to stream. If the upstream
+    returns an error status (4xx/5xx), the error is returned as a proper JSON
+    response with the correct status code instead of being wrapped in a 200 SSE
+    stream — ensuring clients always get proper HTTP error semantics.
+    """
+    # Use a streaming request so we can inspect the status before committing
+    req = client.build_request("POST", url, headers=headers, content=body)
+    resp = await client.send(req, stream=True)
+
+    # If upstream returned an error, return it as a proper HTTP error
+    if resp.status_code >= 400:
+        try:
+            error_body = await resp.aread()
+            await resp.aclose()
+            try:
+                error_json = json.loads(error_body)
+                return JSONResponse(content=error_json, status_code=resp.status_code)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return JSONResponse(
+                    content={"error": {"message": error_body.decode(errors="replace")}},
+                    status_code=resp.status_code,
+                )
+        except Exception:
+            await resp.aclose()
+            return JSONResponse(
+                content={"error": {"message": "Upstream error"}},
+                status_code=resp.status_code,
+            )
 
     async def stream_chunks() -> AsyncIterator[bytes]:
-        async with client.stream("POST", url, headers=headers, content=body) as resp:
+        try:
             async for chunk in resp.aiter_bytes():
                 processed = await pipeline.run_response_chunk(chunk, ctx)
                 yield processed
+        except Exception as exc:
+            # Emit graceful SSE termination events so clients see a clean
+            # stream end rather than a broken pipe (addresses mid-stream errors)
+            logger.warning("streaming_error", error=str(exc))
+            error_event = (
+                'event: error\ndata: {"type": "error", "error": {"type": "proxy_error",'
+                ' "message": "secretgate: upstream connection error during streaming"}}\n\n'
+            )
+            yield error_event.encode("utf-8")
+        finally:
+            await resp.aclose()
 
     return StreamingResponse(content=stream_chunks(), media_type="text/event-stream")

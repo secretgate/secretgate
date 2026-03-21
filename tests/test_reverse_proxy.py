@@ -334,3 +334,95 @@ class TestStreamDetection:
 
         # The mock transport doesn't produce SSE, but the request should succeed
         assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Tests: first-chunk error detection (#23) + streaming error handling (#18)
+# ---------------------------------------------------------------------------
+
+
+def _make_error_upstream(status: int = 429, error_body: dict | None = None):
+    """Create an upstream handler that returns an error for streaming requests."""
+    default_error = error_body or {
+        "error": {"type": "rate_limit_error", "message": "Too many requests"}
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json=default_error)
+
+    return handler
+
+
+class TestFirstChunkErrorDetection:
+    """When upstream returns an error on a streaming request, secretgate should
+    return a proper HTTP error response instead of wrapping it in a 200 SSE stream."""
+
+    def test_upstream_429_returns_proper_status(self):
+        handler = _make_error_upstream(429)
+        client = _build_app(handler)
+
+        resp = client.post(
+            "/anthropic/v1/messages",
+            json={"model": "test", "messages": [], "stream": True},
+        )
+
+        assert resp.status_code == 429
+        data = resp.json()
+        assert data["error"]["type"] == "rate_limit_error"
+
+    def test_upstream_401_returns_proper_status(self):
+        handler = _make_error_upstream(
+            401, {"error": {"type": "authentication_error", "message": "Invalid API key"}}
+        )
+        client = _build_app(handler)
+
+        resp = client.post(
+            "/anthropic/v1/messages",
+            json={"model": "test", "messages": [], "stream": True},
+        )
+
+        assert resp.status_code == 401
+        data = resp.json()
+        assert data["error"]["type"] == "authentication_error"
+
+    def test_upstream_500_returns_proper_status(self):
+        handler = _make_error_upstream(
+            500, {"error": {"type": "server_error", "message": "Internal error"}}
+        )
+        client = _build_app(handler)
+
+        resp = client.post(
+            "/anthropic/v1/messages",
+            json={"model": "test", "messages": [], "stream": True},
+        )
+
+        assert resp.status_code == 500
+
+    def test_upstream_non_json_error_returns_wrapped(self):
+        """Even if upstream returns a non-JSON error body, we should get
+        a proper HTTP error status code."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(502, content=b"Bad Gateway", headers={"content-type": "text/plain"})
+
+        client = _build_app(handler)
+
+        resp = client.post(
+            "/anthropic/v1/messages",
+            json={"model": "test", "messages": [], "stream": True},
+        )
+
+        assert resp.status_code == 502
+
+    def test_non_streaming_error_unchanged(self):
+        """Non-streaming requests should still return errors with correct status."""
+        handler = _make_error_upstream(429)
+        client = _build_app(handler)
+
+        resp = client.post(
+            "/anthropic/v1/messages",
+            json={"model": "test", "messages": [], "stream": False},
+        )
+
+        # Buffered path correctly forwards the upstream status code
+        assert resp.status_code == 429
