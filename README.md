@@ -196,7 +196,11 @@ The forward proxy performs TLS MITM (man-in-the-middle) to inspect HTTPS traffic
 
 - **Claude Code** — LLM API traffic intercepted and scanned, secrets in conversation messages detected (audit + redact modes verified)
 - **curl to httpbin.org** — HTTPS POST bodies with AWS access keys and secret keys detected and redacted
-- **git push** — packfile content (blobs, commits, tags) parsed and scanned; pushes containing secrets are blocked
+- **git push** — packfile content (blobs, commits, tags) parsed and scanned; pushes containing secrets are blocked with a clear error message:
+  ```
+  remote: [secretgate] Git push blocked: 1 secret(s) detected in packfile (Amazon/AWS Access Key)
+  ! [remote rejected] main -> main (secretgate: secrets detected in push)
+  ```
 - **pip, npm** — should work via standard `https_proxy` env var but not yet manually verified
 - **localhost traffic** bypasses the proxy by default (standard HTTP proxy behavior); set `no_proxy=""` to override
 

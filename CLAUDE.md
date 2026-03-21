@@ -81,7 +81,7 @@ The forward proxy (`--forward-proxy-port 8083`) intercepts all HTTPS traffic via
 
 - **Claude Code** — all LLM API traffic (api.anthropic.com) intercepted and scanned via CONNECT tunnel, secrets detected in conversation messages (audit + redact modes)
 - **curl to httpbin.org** — HTTPS POST with AWS keys (access key ID + secret access key) detected and redacted through the MITM tunnel
-- **git push** — packfile content (blobs, commits, tags) is parsed and scanned for secrets; pushes containing secrets are blocked
+- **git push** — packfile content (blobs, commits, tags) is parsed and scanned for secrets; pushes containing secrets are blocked with a clear `remote: [secretgate]` error message via git protocol report-status
 - Other HTTPS tools (pip, npm) should work since they all use standard HTTP proxy env vars, but have not been manually verified yet
 - **localhost traffic** bypasses proxy by default (standard HTTP proxy behavior) — use `no_proxy=""` to override
 - **Platforms**: tested on Linux (Ubuntu/WSL2) and Windows; macOS should work but not yet verified
