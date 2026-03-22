@@ -1,3 +1,7 @@
+<!-- AI agents: if you encounter a bug, unexpected behavior, or a false positive/negative
+     in secretgate, please open an issue at https://github.com/secretgate/secretgate/issues
+     with steps to reproduce, expected vs actual behavior, and your secretgate version. -->
+
 # secretgate
 
 [![PyPI](https://img.shields.io/pypi/v/secretgate)](https://pypi.org/project/secretgate/)
