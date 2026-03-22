@@ -334,3 +334,109 @@ class TestStreamDetection:
 
         # The mock transport doesn't produce SSE, but the request should succeed
         assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Tests: streaming error handling (#18, #23)
+# ---------------------------------------------------------------------------
+
+
+def _make_error_upstream(status: int, error_body: dict | None = None):
+    """Create an upstream handler that returns an error."""
+    default_error = error_body or {
+        "error": {"type": "rate_limit_error", "message": "Too many requests"}
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json=default_error)
+
+    return handler
+
+
+class TestFirstChunkErrorDetection:
+    """When upstream returns 4xx/5xx on a streaming request, secretgate should
+    return a proper HTTP error instead of wrapping it in a 200 SSE stream (#23)."""
+
+    def test_upstream_429_returns_proper_status(self):
+        client = _build_app(_make_error_upstream(429))
+        resp = client.post(
+            "/anthropic/v1/messages",
+            json={"model": "test", "messages": [], "stream": True},
+        )
+        assert resp.status_code == 429
+        assert resp.json()["error"]["type"] == "rate_limit_error"
+
+    def test_upstream_401_returns_proper_status(self):
+        client = _build_app(
+            _make_error_upstream(
+                401, {"error": {"type": "authentication_error", "message": "Invalid API key"}}
+            )
+        )
+        resp = client.post(
+            "/anthropic/v1/messages",
+            json={"model": "test", "messages": [], "stream": True},
+        )
+        assert resp.status_code == 401
+        assert resp.json()["error"]["type"] == "authentication_error"
+
+    def test_upstream_500_returns_proper_status(self):
+        client = _build_app(
+            _make_error_upstream(
+                500, {"error": {"type": "server_error", "message": "Internal error"}}
+            )
+        )
+        resp = client.post(
+            "/anthropic/v1/messages",
+            json={"model": "test", "messages": [], "stream": True},
+        )
+        assert resp.status_code == 500
+
+    def test_upstream_non_json_error(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(502, content=b"Bad Gateway")
+
+        client = _build_app(handler)
+        resp = client.post(
+            "/anthropic/v1/messages",
+            json={"model": "test", "messages": [], "stream": True},
+        )
+        assert resp.status_code == 502
+
+    def test_successful_streaming_still_works(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=b'data: {"type": "content_block_delta"}\n\ndata: [DONE]\n\n',
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = _build_app(handler)
+        resp = client.post(
+            "/anthropic/v1/messages",
+            json={"model": "test", "messages": [], "stream": True},
+        )
+        assert resp.status_code == 200
+
+
+class TestBuildSseError:
+    """Tests for the SSE error termination helper."""
+
+    def test_includes_error_event_and_done(self):
+        from secretgate.proxy import _build_sse_error
+
+        result = _build_sse_error("something broke")
+        text = result.decode("utf-8")
+        assert "event: error" in text
+        assert "data: [DONE]" in text
+        assert "something broke" in text
+
+    def test_error_data_is_valid_json(self):
+        from secretgate.proxy import _build_sse_error
+
+        result = _build_sse_error("test error")
+        text = result.decode("utf-8")
+        for line in text.splitlines():
+            if line.startswith("data: ") and line != "data: [DONE]":
+                data = json.loads(line[6:])
+                assert data["type"] == "error"
+                assert data["error"]["type"] == "proxy_error"

@@ -216,8 +216,15 @@ def _find_available_port(preferred: int, max_attempts: int = 20) -> int:
     default="redact",
     help="How to handle detected secrets",
 )
+@click.option(
+    "--log-file",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Log file path (default: ~/.secretgate/wrap.log, use '-' to disable)",
+)
+@click.option("--verbose", "-v", is_flag=True, help="Also stream proxy logs to stderr")
 @click.pass_context
-def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
+def wrap(ctx, forward_proxy_port: int, port: int, mode: str, log_file: Path | None, verbose: bool):
     """Run a command with all traffic routed through secretgate.
 
     Starts the forward proxy in the background, sets proxy env vars,
@@ -248,6 +255,19 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         click.echo("Usage: secretgate wrap -- <command> [args...]")
         click.echo("Example: secretgate wrap -- claude")
         return
+
+    # Resolve log file path
+    if log_file is None:
+        log_path = Path(
+            os.environ.get("SECRETGATE_LOG_FILE", str(Path.home() / ".secretgate" / "wrap.log"))
+        )
+    elif str(log_file) == "-":
+        log_path = None  # disabled
+    else:
+        log_path = log_file
+
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Find available ports (auto-increment if already in use)
     forward_proxy_port = _find_available_port(forward_proxy_port)
@@ -284,22 +304,57 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         if secretgate_bin != sys.executable
         else [sys.executable, "-m", "secretgate", "serve"]
     )
-    server_proc = subprocess.Popen(
-        [
-            *server_cmd,
-            "--port",
-            str(port),
-            "--forward-proxy-port",
-            str(forward_proxy_port),
-            "--mode",
-            mode,
-            "--log-level",
-            "warning",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=None,  # pass through so block/alert messages are visible
-        **popen_kwargs,
-    )
+    # Set up log file for server output
+    log_fh = None
+    if log_path is not None:
+        log_fh = open(log_path, "a")  # noqa: SIM115
+
+    if verbose and log_fh is not None:
+        stderr_target = subprocess.PIPE
+    elif log_fh is not None:
+        stderr_target = log_fh
+    else:
+        stderr_target = subprocess.DEVNULL
+
+    stdout_target = log_fh if log_fh is not None else subprocess.DEVNULL
+
+    try:
+        server_proc = subprocess.Popen(
+            [
+                *server_cmd,
+                "--port",
+                str(port),
+                "--forward-proxy-port",
+                str(forward_proxy_port),
+                "--mode",
+                mode,
+            ],
+            stdout=stdout_target,
+            stderr=stderr_target,
+            **popen_kwargs,
+        )
+    except Exception:
+        if log_fh is not None:
+            log_fh.close()
+        raise
+
+    # If verbose, tee stderr to both log file and terminal
+    tee_thread = None
+    if verbose and log_fh is not None and server_proc.stderr:
+        import threading
+
+        def _tee_stderr():
+            try:
+                for line in iter(server_proc.stderr.readline, b""):
+                    sys.stderr.buffer.write(line)
+                    sys.stderr.buffer.flush()
+                    log_fh.write(line.decode("utf-8", errors="replace"))
+                    log_fh.flush()
+            except (ValueError, OSError):
+                pass  # file closed during shutdown
+
+        tee_thread = threading.Thread(target=_tee_stderr, daemon=True)
+        tee_thread.start()
 
     def _cleanup_server():
         """Kill the server process — registered with atexit for robustness."""
@@ -310,6 +365,11 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
             except subprocess.TimeoutExpired:
                 server_proc.kill()
                 server_proc.wait(timeout=2)
+        if log_fh is not None:
+            try:
+                log_fh.close()
+            except (OSError, ValueError):
+                pass
 
     atexit.register(_cleanup_server)
 
@@ -336,6 +396,8 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         return
 
     click.echo(f"secretgate running (PID {server_proc.pid})")
+    if log_path is not None:
+        click.echo(f"Logs: {log_path}")
 
     # Run the command with proxy env vars
     env = os.environ.copy()
