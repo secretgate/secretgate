@@ -1,6 +1,6 @@
 [project]
 name = "secretgate"
-version = "0.5.0"
+version = "0.5.1"
 description = "Lean security proxy for AI coding tools — scan and redact secrets before they reach LLM APIs"
 requires-python = ">=3.11"
 license = "Apache-2.0"
