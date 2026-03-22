@@ -216,8 +216,20 @@ def _find_available_port(preferred: int, max_attempts: int = 20) -> int:
     default="redact",
     help="How to handle detected secrets",
 )
+@click.option(
+    "--log-file",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Log file path (default: ~/.secretgate/wrap.log)",
+)
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    help="Also stream proxy logs to stderr",
+)
 @click.pass_context
-def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
+def wrap(ctx, forward_proxy_port: int, port: int, mode: str, log_file: Path | None, verbose: bool):
     """Run a command with all traffic routed through secretgate.
 
     Starts the forward proxy in the background, sets proxy env vars,
@@ -270,6 +282,15 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         f"Starting secretgate (port {port}, forward proxy {forward_proxy_port}, mode {mode})..."
     )
 
+    # Set up log file for proxy output
+    default_log_dir = Path.home() / ".secretgate"
+    if log_file is None:
+        log_file = Path(os.environ.get("SECRETGATE_LOG_FILE", str(default_log_dir / "wrap.log")))
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_fh = open(log_file, "a")
+
+    click.echo(f"Proxy logs: {log_file}")
+
     # On Windows, create a new process group so we can kill the entire tree
     popen_kwargs = {}
     if sys.platform == "win32":
@@ -284,6 +305,15 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
         if secretgate_bin != sys.executable
         else [sys.executable, "-m", "secretgate", "serve"]
     )
+
+    # Determine stderr handling: log file always, plus stderr if verbose
+    if verbose:
+        # Use PIPE and tee to both stderr and log file
+        stderr_target = subprocess.PIPE
+    else:
+        # Write directly to log file
+        stderr_target = log_fh
+
     server_proc = subprocess.Popen(
         [
             *server_cmd,
@@ -294,12 +324,30 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
             "--mode",
             mode,
             "--log-level",
-            "warning",
+            "info",
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=None,  # pass through so block/alert messages are visible
+        stdout=log_fh,
+        stderr=stderr_target,
         **popen_kwargs,
     )
+
+    # If verbose, start a thread to tee stderr to both log file and terminal
+    log_thread = None
+    if verbose:
+        import threading
+
+        def _tee_stderr():
+            try:
+                for line in iter(server_proc.stderr.readline, b""):
+                    sys.stderr.buffer.write(line)
+                    sys.stderr.buffer.flush()
+                    log_fh.write(line.decode("utf-8", errors="replace"))
+                    log_fh.flush()
+            except (ValueError, OSError):
+                pass  # file closed during shutdown
+
+        log_thread = threading.Thread(target=_tee_stderr, daemon=True)
+        log_thread.start()
 
     def _cleanup_server():
         """Kill the server process — registered with atexit for robustness."""
@@ -310,6 +358,10 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str):
             except subprocess.TimeoutExpired:
                 server_proc.kill()
                 server_proc.wait(timeout=2)
+        try:
+            log_fh.close()
+        except Exception:
+            pass
 
     atexit.register(_cleanup_server)
 

@@ -334,3 +334,109 @@ class TestStreamDetection:
 
         # The mock transport doesn't produce SSE, but the request should succeed
         assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Tests: streaming error handling (#18, #23)
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingErrorHandling:
+    """Tests for first-chunk error detection (#23) and mid-stream error handling (#18)."""
+
+    def test_upstream_error_returns_proper_status(self):
+        """When upstream returns 4xx/5xx, streaming should return proper HTTP error (#23)."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                429,
+                json={"error": {"type": "rate_limit_error", "message": "Too many requests"}},
+            )
+
+        client = _build_app(handler)
+        body = {"model": "test", "messages": [], "stream": True}
+        resp = client.post("/anthropic/v1/messages", json=body)
+
+        assert resp.status_code == 429
+        data = resp.json()
+        assert data["error"]["type"] == "rate_limit_error"
+
+    def test_upstream_401_returns_proper_status(self):
+        """Authentication errors should be returned with correct status code."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                401,
+                json={"error": {"type": "authentication_error", "message": "Invalid API key"}},
+            )
+
+        client = _build_app(handler)
+        body = {"model": "test", "messages": [], "stream": True}
+        resp = client.post("/anthropic/v1/messages", json=body)
+
+        assert resp.status_code == 401
+        data = resp.json()
+        assert data["error"]["type"] == "authentication_error"
+
+    def test_upstream_500_returns_proper_status(self):
+        """Server errors should be returned with correct status code."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                500,
+                json={"error": {"type": "server_error", "message": "Internal error"}},
+            )
+
+        client = _build_app(handler)
+        body = {"model": "test", "messages": [], "stream": True}
+        resp = client.post("/anthropic/v1/messages", json=body)
+
+        assert resp.status_code == 500
+
+    def test_upstream_error_non_json(self):
+        """Non-JSON error bodies should still return proper status."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(502, content=b"Bad Gateway")
+
+        client = _build_app(handler)
+        body = {"model": "test", "messages": [], "stream": True}
+        resp = client.post("/anthropic/v1/messages", json=body)
+
+        assert resp.status_code == 502
+
+    def test_successful_streaming_still_works(self):
+        """Normal streaming responses should work correctly."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=b'data: {"type": "content_block_delta"}\n\ndata: [DONE]\n\n',
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = _build_app(handler)
+        body = {"model": "test", "messages": [], "stream": True}
+        resp = client.post("/anthropic/v1/messages", json=body)
+
+        assert resp.status_code == 200
+
+
+class TestBuildSseError:
+    """Tests for the SSE error builder helper."""
+
+    def test_build_sse_error_format(self):
+        from secretgate.proxy import _build_sse_error
+
+        result = _build_sse_error("something went wrong")
+        text = result.decode("utf-8")
+
+        assert "event: error" in text
+        assert "data: [DONE]" in text
+        assert "something went wrong" in text
+        # Should be valid JSON in the error event
+        for line in text.splitlines():
+            if line.startswith("data: ") and line != "data: [DONE]":
+                data = json.loads(line[6:])
+                assert data["type"] == "error"
+                assert data["error"]["type"] == "proxy_error"

@@ -149,13 +149,118 @@ async def _forward_streaming(
     client: httpx.AsyncClient,
     pipeline: Pipeline,
     ctx: PipelineContext,
-) -> StreamingResponse:
-    """Forward request and process streaming response chunks through pipeline."""
+) -> StreamingResponse | JSONResponse:
+    """Forward request and process streaming response chunks through pipeline.
+
+    Peeks at the upstream HTTP status before committing to a streaming response.
+    If the upstream returns an error status (4xx/5xx), returns a proper HTTP
+    error response instead of streaming — ensuring clients always see correct
+    status codes. (#23)
+
+    Mid-stream errors are caught and converted to proper SSE termination events
+    so clients see a graceful stream end rather than a broken pipe. (#18)
+    """
 
     async def stream_chunks() -> AsyncIterator[bytes]:
-        async with client.stream("POST", url, headers=headers, content=body) as resp:
-            async for chunk in resp.aiter_bytes():
-                processed = await pipeline.run_response_chunk(chunk, ctx)
-                yield processed
+        try:
+            async with client.stream("POST", url, headers=headers, content=body) as resp:
+                # If upstream returned an error, emit it as SSE error events
+                # This handles the case where we've already committed to streaming
+                if resp.status_code >= 400:
+                    error_body = await resp.aread()
+                    error_text = error_body.decode("utf-8", errors="replace")
+                    logger.warning(
+                        "streaming_upstream_error",
+                        status=resp.status_code,
+                        body=error_text[:200],
+                    )
+                    yield _build_sse_error(f"Upstream error {resp.status_code}: {error_text[:200]}")
+                    return
 
-    return StreamingResponse(content=stream_chunks(), media_type="text/event-stream")
+                async for chunk in resp.aiter_bytes():
+                    processed = await pipeline.run_response_chunk(chunk, ctx)
+                    yield processed
+        except (httpx.ReadError, httpx.RemoteProtocolError, httpx.StreamError) as exc:
+            # Mid-stream error: emit graceful SSE termination (#18)
+            logger.warning("streaming_midstream_error", error=str(exc))
+            yield _build_sse_error(f"Stream interrupted: {exc}")
+        except Exception as exc:
+            logger.error("streaming_unexpected_error", error=str(exc))
+            yield _build_sse_error(f"Internal proxy error: {exc}")
+
+    # Peek at the upstream response status before committing to streaming (#23)
+    # Use a non-streaming request first to check the status code
+    try:
+        async with client.stream("POST", url, headers=headers, content=body) as peek_resp:
+            if peek_resp.status_code >= 400:
+                # Return proper HTTP error instead of streaming
+                error_body = await peek_resp.aread()
+                try:
+                    error_json = json.loads(error_body)
+                    return JSONResponse(content=error_json, status_code=peek_resp.status_code)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    return JSONResponse(
+                        content={"error": {"message": error_body.decode("utf-8", errors="replace")}},
+                        status_code=peek_resp.status_code,
+                    )
+
+            # Status is OK — read first chunk and start streaming
+            first_chunk = None
+            async for chunk in peek_resp.aiter_bytes():
+                first_chunk = chunk
+                break
+
+            if first_chunk is None:
+                return JSONResponse(
+                    content={"error": {"message": "Empty response from upstream"}},
+                    status_code=502,
+                )
+
+            # Check if first chunk contains an error (some APIs return 200 with error body)
+            first_text = first_chunk.decode("utf-8", errors="replace")
+            if not first_text.startswith("data:") and not first_text.startswith("event:"):
+                try:
+                    maybe_error = json.loads(first_text.strip())
+                    if isinstance(maybe_error, dict) and "error" in maybe_error:
+                        status = maybe_error.get("error", {}).get("status", 500)
+                        if isinstance(status, str):
+                            status = 500
+                        return JSONResponse(content=maybe_error, status_code=status)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+            # Stream the rest, prepending the first chunk we already consumed
+            async def stream_with_first() -> AsyncIterator[bytes]:
+                try:
+                    processed = await pipeline.run_response_chunk(first_chunk, ctx)
+                    yield processed
+                    async for chunk in peek_resp.aiter_bytes():
+                        processed = await pipeline.run_response_chunk(chunk, ctx)
+                        yield processed
+                except (httpx.ReadError, httpx.RemoteProtocolError, httpx.StreamError) as exc:
+                    logger.warning("streaming_midstream_error", error=str(exc))
+                    yield _build_sse_error(f"Stream interrupted: {exc}")
+                except Exception as exc:
+                    logger.error("streaming_unexpected_error", error=str(exc))
+                    yield _build_sse_error(f"Internal proxy error: {exc}")
+
+            return StreamingResponse(content=stream_with_first(), media_type="text/event-stream")
+
+    except httpx.ConnectError as exc:
+        return JSONResponse(
+            content={"error": {"message": f"Failed to connect to upstream: {exc}"}},
+            status_code=502,
+        )
+
+
+def _build_sse_error(message: str) -> bytes:
+    """Build SSE error termination events for graceful stream end.
+
+    Emits an Anthropic-compatible error event followed by a generic [DONE]
+    marker so both Anthropic and OpenAI clients handle the termination.
+    """
+    events = (
+        f'event: error\ndata: {json.dumps({"type": "error", "error": {"type": "proxy_error", "message": message}})}\n\n'
+        "data: [DONE]\n\n"
+    )
+    return events.encode("utf-8")
