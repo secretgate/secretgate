@@ -130,19 +130,34 @@ def serve(
     is_flag=True,
     help="Disable known-value secret scanning (env var / file harvesting)",
 )
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output results as JSON (useful for CI/CD integration)",
+)
 @click.argument("files", nargs=-1, type=click.Path(exists=True))
-def scan(use_detect_secrets: bool, no_entropy: bool, no_known_values: bool, files: tuple[str, ...]):
+def scan(
+    use_detect_secrets: bool,
+    no_entropy: bool,
+    no_known_values: bool,
+    output_json: bool,
+    files: tuple[str, ...],
+):
     """Scan files or stdin for secrets.
 
-    Pass file paths as arguments, or pipe text via stdin.
+    Pass file paths as arguments (directories are scanned recursively),
+    or pipe text via stdin.
 
     \b
     Examples:
         secretgate scan .env config.yaml
         secretgate scan --no-entropy src/
+        secretgate scan --json .         # JSON output for CI
         cat .env | secretgate scan
         git diff --cached | secretgate scan
     """
+    import json
     import sys
     from secretgate.secrets.scanner import SecretScanner
 
@@ -151,26 +166,48 @@ def scan(use_detect_secrets: bool, no_entropy: bool, no_known_values: bool, file
         enable_entropy=not no_entropy,
         enable_known_values=not no_known_values,
     )
-    total_matches = []
+    total_matches: list[tuple[str, object]] = []  # (filepath, match) pairs
 
     if files:
-        for filepath in files:
-            with open(filepath) as f:
-                text = f.read()
+        resolved_files = _resolve_file_paths(files)
+        for filepath in resolved_files:
+            try:
+                with open(filepath) as f:
+                    text = f.read()
+            except (OSError, UnicodeDecodeError):
+                continue  # skip binary / unreadable files
             matches = scanner.scan(text)
             for m in matches:
-                preview = m.value[:8] + "..." if len(m.value) > 8 else m.value
-                click.echo(
-                    f"  {filepath}:{m.line_number}: [{m.service}] {m.pattern_name} — {preview}"
-                )
-            total_matches.extend(matches)
+                total_matches.append((filepath, m))
+                if not output_json:
+                    preview = m.value[:8] + "..." if len(m.value) > 8 else m.value
+                    click.echo(
+                        f"  {filepath}:{m.line_number}: [{m.service}] {m.pattern_name} — {preview}"
+                    )
     else:
         text = sys.stdin.read()
         matches = scanner.scan(text)
         for m in matches:
-            preview = m.value[:8] + "..." if len(m.value) > 8 else m.value
-            click.echo(f"  Line {m.line_number}: [{m.service}] {m.pattern_name} — {preview}")
-        total_matches.extend(matches)
+            total_matches.append(("<stdin>", m))
+            if not output_json:
+                preview = m.value[:8] + "..." if len(m.value) > 8 else m.value
+                click.echo(f"  Line {m.line_number}: [{m.service}] {m.pattern_name} — {preview}")
+
+    if output_json:
+        results = [
+            {
+                "file": fp,
+                "line": m.line_number,
+                "service": m.service,
+                "pattern": m.pattern_name,
+                "preview": m.value[:8] + "..." if len(m.value) > 8 else m.value,
+            }
+            for fp, m in total_matches
+        ]
+        click.echo(json.dumps({"secrets_found": len(results), "results": results}, indent=2))
+        if results:
+            sys.exit(1)
+        return
 
     if not total_matches:
         click.echo("No secrets found.")
@@ -178,6 +215,46 @@ def scan(use_detect_secrets: bool, no_entropy: bool, no_known_values: bool, file
 
     click.echo(f"\n{len(total_matches)} secret(s) found.")
     sys.exit(1)
+
+
+# Binary/generated file extensions to skip during directory scanning
+_SKIP_EXTENSIONS = frozenset({
+    ".pyc", ".pyo", ".so", ".dylib", ".dll", ".exe", ".o", ".a",
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg", ".webp",
+    ".mp3", ".mp4", ".wav", ".avi", ".mov", ".mkv",
+    ".zip", ".gz", ".tar", ".bz2", ".xz", ".7z", ".rar",
+    ".woff", ".woff2", ".ttf", ".eot",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx",
+    ".db", ".sqlite", ".sqlite3",
+})
+
+# Directory names to skip
+_SKIP_DIRS = frozenset({
+    ".git", ".hg", ".svn", "__pycache__", "node_modules", ".venv",
+    "venv", ".tox", ".eggs", ".mypy_cache", ".ruff_cache", "dist",
+    "build", "*.egg-info",
+})
+
+
+def _resolve_file_paths(paths: tuple[str, ...]) -> list[str]:
+    """Expand directories into individual file paths, skipping binary files."""
+    result: list[str] = []
+    for p in paths:
+        path = Path(p)
+        if path.is_file():
+            result.append(str(path))
+        elif path.is_dir():
+            for child in sorted(path.rglob("*")):
+                if not child.is_file():
+                    continue
+                # Skip binary/generated extensions
+                if child.suffix.lower() in _SKIP_EXTENSIONS:
+                    continue
+                # Skip ignored directories
+                if any(part in _SKIP_DIRS for part in child.parts):
+                    continue
+                result.append(str(child))
+    return result
 
 
 def _find_available_port(preferred: int, max_attempts: int = 20) -> int:
