@@ -34,7 +34,7 @@ IDE / CLI / Agent (e.g. Claude Code)
 |            secretgate                |
 |                                      |
 |  :8083 Forward Proxy (all traffic)   |  <-- default, intercepts everything
-|  :8082 Reverse Proxy (LLM APIs)     |  <-- optional, per-provider routing
+|  :8082 Reverse Proxy (LLM APIs)      |  <-- optional, per-provider routing
 |                                      |
 |  +--------------------------------+  |
 |  |  Secret Scanner (~90 regexes)  |  |
@@ -47,7 +47,7 @@ IDE / CLI / Agent (e.g. Claude Code)
 |  |  Audit Logger                  |  |
 |  +--------------------------------+  |
 |                                      |
-|  TLS MITM: auto-generated CA +      |
+|  TLS MITM: auto-generated CA +       |
 |  per-domain certs, cached in memory  |
 +-----------+--------------------------+
             |
