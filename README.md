@@ -27,31 +27,31 @@ invisible, automatic, and accessible to everyone.
 
 ```
 IDE / CLI / Agent (e.g. Claude Code)
-       │
-       │  https_proxy=http://localhost:8083
-       ▼
-┌──────────────────────────────────────┐
-│            secretgate                │
-│                                      │
-│  :8083 Forward Proxy (all traffic)   │  ← default, intercepts everything
-│  :8082 Reverse Proxy (LLM APIs)     │  ← optional, per-provider routing
-│                                      │
-│  ┌────────────────────────────────┐  │
-│  │  Secret Scanner (~90 regexes) │  │
-│  ├────────────────────────────────┤  │
-│  │  Known-Value Scanner          │  │
-│  │  (env vars + secret files)    │  │
-│  ├────────────────────────────────┤  │
-│  │  Modes: redact / block / audit│  │
-│  ├────────────────────────────────┤  │
-│  │  Audit Logger                 │  │
-│  └────────────────────────────────┘  │
-│                                      │
-│  TLS MITM: auto-generated CA +      │
-│  per-domain certs, cached in memory  │
-└───────────┬──────────────────────────┘
-            │
-            ▼
+       |
+       |  https_proxy=http://localhost:8083
+       v
++--------------------------------------+
+|            secretgate                |
+|                                      |
+|  :8083 Forward Proxy (all traffic)   |  <-- default, intercepts everything
+|  :8082 Reverse Proxy (LLM APIs)     |  <-- optional, per-provider routing
+|                                      |
+|  +--------------------------------+  |
+|  |  Secret Scanner (~90 regexes)  |  |
+|  +--------------------------------+  |
+|  |  Known-Value Scanner           |  |
+|  |  (env vars + secret files)     |  |
+|  +--------------------------------+  |
+|  |  Modes: redact / block / audit |  |
+|  +--------------------------------+  |
+|  |  Audit Logger                  |  |
+|  +--------------------------------+  |
+|                                      |
+|  TLS MITM: auto-generated CA +      |
+|  per-domain certs, cached in memory  |
++-----------+--------------------------+
+            |
+            v
   github.com, api.anthropic.com,
   pypi.org, npmjs.com, ...
 ```
