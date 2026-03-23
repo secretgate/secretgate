@@ -2,7 +2,7 @@
 
 secretgate detects secrets using three methods:
 
-1. **Regex patterns** (~75 patterns in `signatures.yaml`)
+1. **Regex patterns** (~170 patterns in `signatures.yaml`)
 2. **Shannon entropy analysis** for high-entropy values in key=value assignments
 3. **Optional [detect-secrets](https://github.com/Yelp/detect-secrets) integration** (23 additional regex plugins)
 
@@ -19,6 +19,7 @@ secretgate detects secrets using three methods:
 | AWS | Secret Key | `aws_secret_access_key = ...` (40 chars) |
 | AWS | MWS Token | `amzn.mws.` + UUID |
 | AWS | AppSync API Key | `da2-` + 26 alnum |
+| AWS | Bedrock API Key | `ABSK` + 109-269 base64 |
 | GCP | API Key | `AIza...` (39 chars) |
 | GCP | Service Account | `"type": "service_account"` |
 | Google | OAuth Access Token | `ya29.` + variable length |
@@ -38,6 +39,7 @@ secretgate detects secrets using three methods:
 | Cloudflare | Origin CA Key | `v1.0-` + 24 hex + `-` + 146 hex |
 | DigitalOcean | Access Token | `dop_v1_` + 64 hex |
 | DigitalOcean | OAuth Token | `doo_v1_` + 64 hex |
+| DigitalOcean | OAuth Refresh Token | `dor_v1_` + 64 hex |
 | Alibaba Cloud | Access Key ID | `LTAI` + 20 chars |
 
 ### AI / ML Services
@@ -63,6 +65,16 @@ secretgate detects secrets using three methods:
 | GitLab | Personal Access Token | `glpat-` + 20 chars |
 | GitLab | Pipeline Token | `glptt-` + 40 hex |
 | GitLab | Runner Token | `glrt-` + 20 chars |
+| GitLab | OAuth App Secret | `gloas-` + 64 chars |
+| GitLab | Runner Registration Token | `GR1348941` + 20 chars |
+| GitLab | Instance-Prefixed PAT | `glpat-` + 27-300 chars + `.` + 9 chars |
+| GitLab | CI/CD Job Token | `glcbt-` + variable |
+| GitLab | Deploy Token | `gldt-` + 20 chars |
+| GitLab | Feature Flag Client Token | `glffct-` + 20 chars |
+| GitLab | Feed Token | `glft-` + 20 chars |
+| GitLab | Incoming Mail Token | `glimt-` + 25 chars |
+| GitLab | Kubernetes Agent Token | `glagent-` + 50 chars |
+| GitLab | SCIM Token | `glsoat-` + 20 chars |
 
 ### Messaging / Communication
 
@@ -71,6 +83,7 @@ secretgate detects secrets using three methods:
 | Slack | Bot Token | `xoxb-...` |
 | Slack | User Token | `xoxp-...` |
 | Slack | App-Level Token | `xapp-...` |
+| Slack | Config Refresh Token | `xoxe-` + variable |
 | Slack | Webhook URL | `https://hooks.slack.com/services/...` |
 | Discord | Bot Token | `[MNO]...` (3-part dot-separated) |
 | Telegram | Bot API Token | `123456:AA...` (numeric:alpha) |
@@ -173,6 +186,16 @@ secretgate detects secrets using three methods:
 |---------|---------|-----------------|
 | Artifactory | API Key | `AKCp` + 69 alnum |
 | Artifactory | Reference Token | `cmVmd` + 59 alnum |
+
+### Additional Services
+
+| Service | Pattern | Prefix / Format |
+|---------|---------|-----------------|
+| Adobe | Client Secret | `p8e-` + 32 alnum |
+| Duffel | API Token | `duffel_test_` / `duffel_live_` + 43 chars |
+| EasyPost | API Token | `EZAK` + 54 alnum |
+| EasyPost | Test API Token | `EZTK` + 54 alnum |
+| OpenShift | User Token | `sha256~` + 43 chars |
 
 ### Database Connection Strings
 

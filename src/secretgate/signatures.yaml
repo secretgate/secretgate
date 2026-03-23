@@ -39,6 +39,7 @@
 - DigitalOcean:
     - Access Token: "dop_v1_[a-f0-9]{64}"
     - OAuth Token: "doo_v1_[a-f0-9]{64}"
+    - OAuth Refresh Token: "dor_v1_[a-f0-9]{64}"
 
 - Cloudflare:
     - Origin CA Key: "v1\\.0-[a-f0-9]{24}-[a-f0-9]{146}"
@@ -91,10 +92,18 @@
 
 - GitLab:
     - Personal Access Token: "glpat-[0-9a-zA-Z\\-_]{20}"
+    - "Instance-Prefixed PAT": "glpat-[0-9a-zA-Z_-]{27,300}\\.[0-9a-z]{9}"
     - Pipeline Token: "glptt-[0-9a-f]{40}"
     - Runner Token: "glrt-[0-9a-zA-Z\\-_]{20}"
     - OAuth App Secret: "gloas-[0-9a-zA-Z_\\-]{64}"
     - Runner Registration Token: "GR1348941[a-zA-Z0-9_-]{20}"
+    - "CI/CD Job Token": "glcbt-[0-9a-zA-Z]{1,5}_[0-9a-zA-Z_-]{20}"
+    - Deploy Token: "gldt-[0-9a-zA-Z_-]{20}"
+    - Feature Flag Client Token: "glffct-[0-9a-zA-Z_-]{20}"
+    - Feed Token: "glft-[0-9a-zA-Z_-]{20}"
+    - Incoming Mail Token: "glimt-[0-9a-zA-Z_-]{25}"
+    - Kubernetes Agent Token: "glagent-[0-9a-zA-Z_-]{50}"
+    - SCIM Token: "glsoat-[0-9a-zA-Z_-]{20}"
 
 # --- Messaging / Communication ---
 
@@ -102,6 +111,7 @@
     - Bot Token: "xoxb-[0-9]{11}-[0-9]{11}-[0-9a-zA-Z]{24}"
     - User Token: "xoxp-[0-9]{11}-[0-9]{11}-[0-9a-zA-Z]{24}"
     - App-Level Token: "xapp-\\d+-[A-Z0-9]+-\\d+-[a-z0-9]+"
+    - Config Refresh Token: "xoxe-[0-9]-[A-Z0-9]{146}"
     - Webhook URL: "https://hooks\\.slack\\.com/services/T[a-zA-Z0-9_]{8,}/B[a-zA-Z0-9_]{8,}/[a-zA-Z0-9_]{24}"
 
 - Discord:
@@ -343,6 +353,19 @@
 
 - Shippo:
     - API Token: "\\bshippo_(?:live|test)_[a-fA-F0-9]{40}\\b"
+
+- Adobe:
+    - Client Secret: "\\bp8e-[a-zA-Z0-9]{32}\\b"
+
+- Duffel:
+    - API Token: "\\bduffel_(?:test|live)_[a-zA-Z0-9_-]{43}\\b"
+
+- EasyPost:
+    - API Token: "\\bEZAK[a-zA-Z0-9]{54}\\b"
+    - Test API Token: "\\bEZTK[a-zA-Z0-9]{54}\\b"
+
+- OpenShift:
+    - User Token: "\\bsha256~[\\w-]{43}\\b"
 
 - Ubidots:
     - Token: "\\bBBFF-[0-9a-zA-Z]{30}\\b"

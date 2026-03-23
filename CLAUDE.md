@@ -19,7 +19,7 @@ Lean security proxy for AI coding tools — scans and redacts secrets before the
   - `secrets/redactor.py` — deterministic `REDACTED<slug:hash12>` placeholders via SHA-256
   - `secrets/known_values.py` — known-value scanning: harvest env vars/files at startup, Aho-Corasick or naive matching
   - `secrets/detect_secrets_adapter.py` — optional Yelp detect-secrets integration (regex plugins only)
-  - `signatures.yaml` — ~90 regex patterns (AWS, GCP, GitHub, Slack, OpenAI, Anthropic, Stripe, etc.)
+  - `signatures.yaml` — ~170 regex patterns (AWS, GCP, GitHub, GitLab, Slack, OpenAI, Anthropic, Stripe, etc.)
 - `scripts/` — helper scripts
   - `setup.sh` — one-time setup (install CA, trust instructions, shell config)
   - `with-secretgate.sh` — standalone wrapper (starts proxy, runs command, stops proxy)
