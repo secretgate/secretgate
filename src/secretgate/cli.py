@@ -10,6 +10,7 @@ import uvicorn
 
 
 @click.group()
+@click.version_option(package_name="secretgate")
 def main():
     """secretgate — security proxy for AI coding tools."""
     pass
