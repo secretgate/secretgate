@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 import ssl
 
+import h2.config
+import h2.connection
+import h2.events
 import pytest
 
 from secretgate.certs import CertAuthority
@@ -126,6 +129,72 @@ class TestForwardProxyStartup:
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
         writer.close()
         await writer.wait_closed()
+
+    async def test_alpn_negotiates_h2(self, ca, proxy_server):
+        """TLS MITM context should negotiate h2 via ALPN when client supports it."""
+        _, port = proxy_server
+
+        echo_server = await _run_echo_https_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+
+            connect_req = (
+                f"CONNECT 127.0.0.1:{echo_port} HTTP/1.1\r\nHost: 127.0.0.1:{echo_port}\r\n\r\n"
+            )
+            writer.write(connect_req.encode())
+            await writer.drain()
+
+            response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 Connection Established" in response
+
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx.load_verify_locations(str(ca.ca_cert_path))
+            ssl_ctx.set_alpn_protocols(["h2", "http/1.1"])
+            await writer.start_tls(ssl_ctx, server_hostname="127.0.0.1")
+
+            ssl_object = writer.get_extra_info("ssl_object")
+            assert ssl_object is not None
+            assert ssl_object.selected_alpn_protocol() == "h2"
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
+
+    async def test_alpn_falls_back_to_http11(self, ca, proxy_server):
+        """When client only supports http/1.1, ALPN should negotiate http/1.1."""
+        _, port = proxy_server
+
+        echo_server = await _run_echo_https_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+
+            connect_req = (
+                f"CONNECT 127.0.0.1:{echo_port} HTTP/1.1\r\nHost: 127.0.0.1:{echo_port}\r\n\r\n"
+            )
+            writer.write(connect_req.encode())
+            await writer.drain()
+
+            response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 Connection Established" in response
+
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx.load_verify_locations(str(ca.ca_cert_path))
+            ssl_ctx.set_alpn_protocols(["http/1.1"])
+            await writer.start_tls(ssl_ctx, server_hostname="127.0.0.1")
+
+            ssl_object = writer.get_extra_info("ssl_object")
+            assert ssl_object is not None
+            assert ssl_object.selected_alpn_protocol() == "http/1.1"
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
 
 
 class TestPlainHTTP:
@@ -620,3 +689,311 @@ class TestErrorResponses:
         finally:
             drop_server.close()
             await drop_server.wait_closed()
+
+
+# --- HTTP/2 test infrastructure ---
+
+
+async def _run_h2_echo_server(ca: CertAuthority, host: str = "127.0.0.1"):
+    """Run an HTTPS echo server that speaks HTTP/2 and echoes request bodies back."""
+    ssl_ctx = ca.get_domain_context(host)
+
+    async def handle(reader, writer):
+        config = h2.config.H2Configuration(client_side=False)
+        conn = h2.connection.H2Connection(config=config)
+        conn.initiate_connection()
+        writer.write(conn.data_to_send())
+        await writer.drain()
+
+        # Per-stream state
+        streams: dict[int, tuple[list, bytearray]] = {}  # stream_id -> (headers, body)
+
+        try:
+            while True:
+                data = await reader.read(65536)
+                if not data:
+                    break
+
+                events = conn.receive_data(data)
+                for event in events:
+                    if isinstance(event, h2.events.RequestReceived):
+                        streams[event.stream_id] = (event.headers, bytearray())
+
+                    elif isinstance(event, h2.events.DataReceived):
+                        if event.stream_id in streams:
+                            streams[event.stream_id][1].extend(event.data)
+                        conn.acknowledge_received_data(
+                            event.flow_controlled_length, event.stream_id
+                        )
+
+                    elif isinstance(event, h2.events.StreamEnded):
+                        if event.stream_id in streams:
+                            req_headers, req_body = streams.pop(event.stream_id)
+                            response_body = bytes(req_body) if req_body else b"OK"
+                            response_headers = [
+                                (":status", "200"),
+                                ("content-type", "text/plain"),
+                                ("content-length", str(len(response_body))),
+                            ]
+                            conn.send_headers(event.stream_id, response_headers)
+                            conn.send_data(event.stream_id, response_body, end_stream=True)
+
+                    elif isinstance(event, h2.events.ConnectionTerminated):
+                        writer.write(conn.data_to_send())
+                        await writer.drain()
+                        return
+
+                writer.write(conn.data_to_send())
+                await writer.drain()
+        except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            if not writer.is_closing():
+                writer.close()
+
+    server = await asyncio.start_server(handle, host, 0, ssl=ssl_ctx)
+    return server
+
+
+async def _h2_connect_and_upgrade(ca, proxy_port, echo_port, host="127.0.0.1"):
+    """Helper: CONNECT through proxy, upgrade to TLS with h2 ALPN, return (reader, writer, h2_conn)."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+
+    connect_req = f"CONNECT {host}:{echo_port} HTTP/1.1\r\nHost: {host}:{echo_port}\r\n\r\n"
+    writer.write(connect_req.encode())
+    await writer.drain()
+
+    response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+    assert b"200 Connection Established" in response
+
+    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ssl_ctx.load_verify_locations(str(ca.ca_cert_path))
+    ssl_ctx.set_alpn_protocols(["h2", "http/1.1"])
+    await writer.start_tls(ssl_ctx, server_hostname=host)
+
+    # Verify h2 was negotiated
+    ssl_object = writer.get_extra_info("ssl_object")
+    assert ssl_object.selected_alpn_protocol() == "h2"
+
+    # Set up h2 client connection
+    config = h2.config.H2Configuration(client_side=True)
+    h2_conn = h2.connection.H2Connection(config=config)
+    h2_conn.initiate_connection()
+    writer.write(h2_conn.data_to_send())
+    await writer.drain()
+
+    # Read server settings
+    data = await asyncio.wait_for(reader.read(65536), timeout=5.0)
+    h2_conn.receive_data(data)
+    writer.write(h2_conn.data_to_send())
+    await writer.drain()
+
+    return reader, writer, h2_conn
+
+
+async def _h2_send_request(h2_conn, writer, headers, body=b""):
+    """Send an h2 request, return the stream_id."""
+    stream_id = h2_conn.get_next_available_stream_id()
+    h2_conn.send_headers(stream_id, headers, end_stream=(len(body) == 0))
+    if body:
+        h2_conn.send_data(stream_id, body, end_stream=True)
+    writer.write(h2_conn.data_to_send())
+    await writer.drain()
+    return stream_id
+
+
+async def _h2_read_response(reader, h2_conn, writer, stream_id, timeout=5.0):
+    """Read an h2 response for the given stream_id, return (status, headers, body)."""
+    response_headers = None
+    body = bytearray()
+    done = False
+
+    deadline = asyncio.get_event_loop().time() + timeout
+    while not done:
+        remaining = deadline - asyncio.get_event_loop().time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError()
+        data = await asyncio.wait_for(reader.read(65536), timeout=remaining)
+        if not data:
+            break
+        events = h2_conn.receive_data(data)
+        for event in events:
+            if isinstance(event, h2.events.ResponseReceived) and event.stream_id == stream_id:
+                response_headers = event.headers
+            elif isinstance(event, h2.events.DataReceived) and event.stream_id == stream_id:
+                body.extend(event.data)
+                h2_conn.acknowledge_received_data(event.flow_controlled_length, event.stream_id)
+            elif isinstance(event, h2.events.StreamEnded) and event.stream_id == stream_id:
+                done = True
+            elif isinstance(event, h2.events.StreamReset) and event.stream_id == stream_id:
+                done = True
+        writer.write(h2_conn.data_to_send())
+        await writer.drain()
+
+    status = None
+    hdrs = {}
+    if response_headers:
+        for name, value in response_headers:
+            n = name.decode("utf-8") if isinstance(name, bytes) else name
+            v = value.decode("utf-8") if isinstance(value, bytes) else value
+            if n == ":status":
+                status = int(v)
+            else:
+                hdrs[n] = v
+
+    return status, hdrs, bytes(body)
+
+
+class TestH2Tunnel:
+    """HTTP/2 support through CONNECT tunnel with TLS MITM."""
+
+    async def test_h2_echo_through_proxy(self, ca, proxy_server):
+        """Basic h2 request/response through the MITM tunnel."""
+        _, port = proxy_server
+
+        echo_server = await _run_h2_echo_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer, h2_conn = await _h2_connect_and_upgrade(ca, port, echo_port)
+
+            headers = [
+                (":method", "POST"),
+                (":path", "/test"),
+                (":scheme", "https"),
+                (":authority", "127.0.0.1"),
+                ("content-type", "text/plain"),
+                ("content-length", "5"),
+            ]
+            stream_id = await _h2_send_request(h2_conn, writer, headers, body=b"hello")
+
+            status, hdrs, body = await _h2_read_response(reader, h2_conn, writer, stream_id)
+            assert status == 200
+            assert body == b"hello"
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
+
+    async def test_h2_secret_redacted(self, ca, proxy_server):
+        """Secrets in h2 request bodies should be redacted."""
+        _, port = proxy_server
+
+        echo_server = await _run_h2_echo_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer, h2_conn = await _h2_connect_and_upgrade(ca, port, echo_port)
+
+            secret = b"AKIAIOSFODNN7EXAMPLE"
+            body = b"data=" + secret
+            headers = [
+                (":method", "POST"),
+                (":path", "/v1/messages"),
+                (":scheme", "https"),
+                (":authority", "127.0.0.1"),
+                ("content-type", "application/x-www-form-urlencoded"),
+                ("content-length", str(len(body))),
+            ]
+            stream_id = await _h2_send_request(h2_conn, writer, headers, body=body)
+
+            status, hdrs, resp_body = await _h2_read_response(reader, h2_conn, writer, stream_id)
+            assert status == 200
+            # The AWS key should be redacted
+            assert b"AKIAIOSFODNN7EXAMPLE" not in resp_body
+            assert b"REDACTED<" in resp_body
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
+
+    async def test_h2_block_mode(self, ca, blocking_proxy_server):
+        """Block mode should return 403 on h2 stream when secrets detected."""
+        _, port = blocking_proxy_server
+
+        echo_server = await _run_h2_echo_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer, h2_conn = await _h2_connect_and_upgrade(ca, port, echo_port)
+
+            body = b"secret=AKIAIOSFODNN7EXAMPLE"
+            headers = [
+                (":method", "POST"),
+                (":path", "/test"),
+                (":scheme", "https"),
+                (":authority", "127.0.0.1"),
+                ("content-type", "text/plain"),
+                ("content-length", str(len(body))),
+            ]
+            stream_id = await _h2_send_request(h2_conn, writer, headers, body=body)
+
+            status, hdrs, resp_body = await _h2_read_response(reader, h2_conn, writer, stream_id)
+            assert status == 403
+            assert b"[secretgate]" in resp_body
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
+
+    async def test_h2_auth_path_skip(self, ca, proxy_server):
+        """Auth endpoints should skip scanning in h2 mode."""
+        _, port = proxy_server
+
+        echo_server = await _run_h2_echo_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer, h2_conn = await _h2_connect_and_upgrade(ca, port, echo_port)
+
+            jwt = b"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature_here"
+            body = b'{"refresh_token":"' + jwt + b'"}'
+            headers = [
+                (":method", "POST"),
+                (":path", "/oauth/token"),
+                (":scheme", "https"),
+                (":authority", "127.0.0.1"),
+                ("content-type", "application/json"),
+                ("content-length", str(len(body))),
+            ]
+            stream_id = await _h2_send_request(h2_conn, writer, headers, body=body)
+
+            status, hdrs, resp_body = await _h2_read_response(reader, h2_conn, writer, stream_id)
+            assert status == 200
+            # JWT should NOT be redacted — auth path skips scanning
+            assert jwt in resp_body
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
+
+    async def test_h2_no_body_request(self, ca, proxy_server):
+        """GET request with no body should work through h2."""
+        _, port = proxy_server
+
+        echo_server = await _run_h2_echo_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer, h2_conn = await _h2_connect_and_upgrade(ca, port, echo_port)
+
+            headers = [
+                (":method", "GET"),
+                (":path", "/health"),
+                (":scheme", "https"),
+                (":authority", "127.0.0.1"),
+            ]
+            stream_id = await _h2_send_request(h2_conn, writer, headers, body=b"")
+
+            status, hdrs, body = await _h2_read_response(reader, h2_conn, writer, stream_id)
+            assert status == 200
+            assert body == b"OK"
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()

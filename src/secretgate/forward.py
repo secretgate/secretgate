@@ -16,6 +16,7 @@ import h11
 import structlog
 
 from secretgate.certs import CertAuthority
+from secretgate.h2_handler import H2ConnectionHandler
 from secretgate.scan import BlockedError, TextScanner
 
 logger = structlog.get_logger()
@@ -263,6 +264,8 @@ class _ConnectionHandler:
             return
 
         upstream_ssl = self._upstream_ssl or ssl.create_default_context()
+        # Advertise h2 and http/1.1 to upstream so we can match client protocol
+        upstream_ssl.set_alpn_protocols(["h2", "http/1.1"])
 
         # Connect to the real upstream with TLS verification
         try:
@@ -272,6 +275,10 @@ class _ConnectionHandler:
             self._writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
             await self._writer.drain()
             return
+
+        # Check what protocol upstream negotiated
+        up_ssl_obj = up_writer.get_extra_info("ssl_object")
+        upstream_proto = up_ssl_obj.selected_alpn_protocol() if up_ssl_obj else None
 
         # Tell the client the tunnel is established
         self._writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -286,18 +293,39 @@ class _ConnectionHandler:
             up_writer.close()
             return
 
-        # Now relay HTTP requests/responses through the TLS tunnel with scanning
-        # After start_tls, self._reader and self._writer are upgraded to TLS
-        try:
-            await self._relay_http(
-                self._reader,
-                self._writer,
-                up_reader,
-                up_writer,
-                host,
-                upstream_ssl=upstream_ssl,
-                upstream_port=port,
+        # Check what protocol client negotiated
+        client_ssl_obj = self._writer.get_extra_info("ssl_object")
+        client_proto = client_ssl_obj.selected_alpn_protocol() if client_ssl_obj else None
+
+        # Dispatch based on negotiated protocols
+        use_h2 = client_proto == "h2" and upstream_proto == "h2"
+        if client_proto == "h2" and upstream_proto != "h2":
+            # Client wants h2 but upstream doesn't support it — reconnect upstream
+            # with h1-only ALPN is not possible (already connected). Fall back to h1.
+            # This shouldn't normally happen since our MITM cert advertises h2 only
+            # when we know upstream supports it. But handle it gracefully.
+            logger.debug(
+                "h2_protocol_mismatch",
+                host=host,
+                client=client_proto,
+                upstream=upstream_proto,
             )
+
+        try:
+            if use_h2:
+                logger.debug("h2_relay_start", host=host)
+                handler = H2ConnectionHandler(self._scanner, host)
+                await handler.run(self._reader, self._writer, up_reader, up_writer)
+            else:
+                await self._relay_http(
+                    self._reader,
+                    self._writer,
+                    up_reader,
+                    up_writer,
+                    host,
+                    upstream_ssl=upstream_ssl,
+                    upstream_port=port,
+                )
         finally:
             if not up_writer.is_closing():
                 up_writer.close()

@@ -250,6 +250,7 @@ class CertAuthority:
         )
 
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.set_alpn_protocols(["h2", "http/1.1"])
 
         cert_pem = domain_cert.public_bytes(
             serialization.Encoding.PEM
