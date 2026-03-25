@@ -997,3 +997,109 @@ class TestH2Tunnel:
         finally:
             echo_server.close()
             await echo_server.wait_closed()
+
+    async def test_h2_upstream_reconnect(self, ca, proxy_server):
+        """After upstream closes h2 connection, proxy should reconnect for next request."""
+        _, port = proxy_server
+
+        # Use an h2 echo server that sends GOAWAY after the first response
+        ssl_ctx = ca.get_domain_context("127.0.0.1")
+        request_count = 0
+
+        async def h2_handle_once(h2_reader, h2_writer):
+            """H2 server that closes connection after first request via GOAWAY."""
+            nonlocal request_count
+            config = h2.config.H2Configuration(client_side=False)
+            conn = h2.connection.H2Connection(config=config)
+            conn.initiate_connection()
+            h2_writer.write(conn.data_to_send())
+            await h2_writer.drain()
+            streams: dict[int, tuple[list, bytearray]] = {}
+            try:
+                while True:
+                    data = await h2_reader.read(65536)
+                    if not data:
+                        break
+                    events = conn.receive_data(data)
+                    for event in events:
+                        if isinstance(event, h2.events.RequestReceived):
+                            streams[event.stream_id] = (event.headers, bytearray())
+                        elif isinstance(event, h2.events.DataReceived):
+                            if event.stream_id in streams:
+                                streams[event.stream_id][1].extend(event.data)
+                            conn.acknowledge_received_data(
+                                event.flow_controlled_length, event.stream_id
+                            )
+                        elif isinstance(event, h2.events.StreamEnded):
+                            if event.stream_id in streams:
+                                _, req_body = streams.pop(event.stream_id)
+                                resp_body = bytes(req_body) if req_body else b"OK"
+                                conn.send_headers(
+                                    event.stream_id,
+                                    [
+                                        (":status", "200"),
+                                        ("content-type", "text/plain"),
+                                        ("content-length", str(len(resp_body))),
+                                    ],
+                                )
+                                conn.send_data(event.stream_id, resp_body, end_stream=True)
+                                request_count += 1
+                                if request_count == 1:
+                                    # After first response, send GOAWAY and close
+                                    conn.close_connection(error_code=0)
+                                    h2_writer.write(conn.data_to_send())
+                                    await h2_writer.drain()
+                                    h2_writer.close()
+                                    return
+                    h2_writer.write(conn.data_to_send())
+                    await h2_writer.drain()
+            except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError):
+                pass
+            finally:
+                if not h2_writer.is_closing():
+                    h2_writer.close()
+
+        echo_server = await asyncio.start_server(h2_handle_once, "127.0.0.1", 0, ssl=ssl_ctx)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer, h2_conn = await _h2_connect_and_upgrade(ca, port, echo_port)
+
+            # First request — works, then server sends GOAWAY and closes
+            headers = [
+                (":method", "POST"),
+                (":path", "/test"),
+                (":scheme", "https"),
+                (":authority", "127.0.0.1"),
+                ("content-type", "text/plain"),
+                ("content-length", "5"),
+            ]
+            stream_id = await _h2_send_request(h2_conn, writer, headers, body=b"hello")
+            status, _, body = await _h2_read_response(reader, h2_conn, writer, stream_id)
+            assert status == 200
+            assert body == b"hello"
+
+            # Give proxy time to detect upstream GOAWAY/close and reconnect
+            await asyncio.sleep(0.5)
+
+            # Second request — proxy should have reconnected to the same echo server
+            # (which now accepts new connections and serves normally)
+            headers2 = [
+                (":method", "POST"),
+                (":path", "/test2"),
+                (":scheme", "https"),
+                (":authority", "127.0.0.1"),
+                ("content-type", "text/plain"),
+                ("content-length", "5"),
+            ]
+            stream_id2 = await _h2_send_request(h2_conn, writer, headers2, body=b"world")
+            status2, _, body2 = await _h2_read_response(
+                reader, h2_conn, writer, stream_id2, timeout=10.0
+            )
+            assert status2 == 200
+            assert body2 == b"world"
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()

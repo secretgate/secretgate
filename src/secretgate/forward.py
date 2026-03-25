@@ -264,23 +264,9 @@ class _ConnectionHandler:
             return
 
         upstream_ssl = self._upstream_ssl or ssl.create_default_context()
-        # Advertise h2 and http/1.1 to upstream so we can match client protocol
-        upstream_ssl.set_alpn_protocols(["h2", "http/1.1"])
 
-        # Connect to the real upstream with TLS verification
-        try:
-            up_reader, up_writer = await asyncio.open_connection(host, port, ssl=upstream_ssl)
-        except Exception as exc:
-            logger.warning("forward_upstream_connect_failed", host=host, error=str(exc))
-            self._writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
-            await self._writer.drain()
-            return
-
-        # Check what protocol upstream negotiated
-        up_ssl_obj = up_writer.get_extra_info("ssl_object")
-        upstream_proto = up_ssl_obj.selected_alpn_protocol() if up_ssl_obj else None
-
-        # Tell the client the tunnel is established
+        # Tell the client the tunnel is established (before connecting upstream,
+        # so we can do the TLS handshake with the client first to learn their ALPN)
         self._writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         await self._writer.drain()
 
@@ -290,33 +276,31 @@ class _ConnectionHandler:
             await self._writer.start_tls(mitm_ctx)
         except Exception as exc:
             logger.debug("forward_tls_handshake_failed", host=host, error=str(exc))
-            up_writer.close()
             return
 
-        # Check what protocol client negotiated
+        # Check what protocol client negotiated via ALPN
         client_ssl_obj = self._writer.get_extra_info("ssl_object")
         client_proto = client_ssl_obj.selected_alpn_protocol() if client_ssl_obj else None
 
-        # Dispatch based on negotiated protocols
-        use_h2 = client_proto == "h2" and upstream_proto == "h2"
-        if client_proto == "h2" and upstream_proto != "h2":
-            # Client wants h2 but upstream doesn't support it — reconnect upstream
-            # with h1-only ALPN is not possible (already connected). Fall back to h1.
-            # This shouldn't normally happen since our MITM cert advertises h2 only
-            # when we know upstream supports it. But handle it gracefully.
-            logger.debug(
-                "h2_protocol_mismatch",
-                host=host,
-                client=client_proto,
-                upstream=upstream_proto,
+        if client_proto == "h2":
+            # Client wants h2 — the h2 handler manages its own upstream
+            # connections (with h2 ALPN) and handles reconnects.
+            logger.debug("h2_relay_start", host=host)
+            handler = H2ConnectionHandler(
+                self._scanner,
+                host,
+                upstream_port=port,
+                upstream_ssl=upstream_ssl,
             )
-
-        try:
-            if use_h2:
-                logger.debug("h2_relay_start", host=host)
-                handler = H2ConnectionHandler(self._scanner, host)
-                await handler.run(self._reader, self._writer, up_reader, up_writer)
-            else:
+            await handler.run_client_only(self._reader, self._writer)
+        else:
+            # Client wants http/1.1 — connect upstream without h2 ALPN
+            try:
+                up_reader, up_writer = await asyncio.open_connection(host, port, ssl=upstream_ssl)
+            except Exception as exc:
+                logger.warning("forward_upstream_connect_failed", host=host, error=str(exc))
+                return
+            try:
                 await self._relay_http(
                     self._reader,
                     self._writer,
@@ -326,13 +310,13 @@ class _ConnectionHandler:
                     upstream_ssl=upstream_ssl,
                     upstream_port=port,
                 )
-        finally:
-            if not up_writer.is_closing():
-                up_writer.close()
-                try:
-                    await up_writer.wait_closed()
-                except Exception:
-                    pass
+            finally:
+                if not up_writer.is_closing():
+                    up_writer.close()
+                    try:
+                        await up_writer.wait_closed()
+                    except Exception:
+                        pass
 
     async def _passthrough_tunnel(self, host: str, port: int) -> None:
         """Pass through a CONNECT tunnel without MITM (for passthrough domains)."""
