@@ -6,7 +6,7 @@ secretgate's regex scanner detects secrets by **shape** — patterns like `AKIA[
 
 - **Custom or internal tokens** with no standard prefix (e.g. `mycompany_live_xK9mP2nQ7rT4wZ8a`)
 - **Secrets pasted without context** — a bare API key on a line by itself, without `API_KEY=` around it
-- **Secrets from unrecognized services** that don't match any of the ~90 built-in patterns
+- **Secrets from unrecognized services** that don't match any of the ~170 built-in patterns
 - **Database passwords, encryption keys, and other values** that are just random strings
 
 The known-value scanner solves this by detecting secrets based on their **actual value**, not their shape.
@@ -84,7 +84,7 @@ REDACTED<my-secret-token:a1b2c3d4e5f6>
 The `SecretScanner.scan()` method runs detectors in this order:
 
 ```
-1. Regex patterns (~90 signatures)     ← highest priority
+1. Regex patterns (~170 signatures)     ← highest priority
 2. Entropy detection (key=value pairs)
 3. detect-secrets plugins (optional)
 4. Known-value scanner                 ← lowest priority
