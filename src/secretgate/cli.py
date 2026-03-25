@@ -8,9 +8,11 @@ import click
 import structlog
 import uvicorn
 
+from secretgate import __version__
+
 
 @click.group()
-@click.version_option(package_name="secretgate")
+@click.version_option(version=__version__)
 def main():
     """secretgate — security proxy for AI coding tools."""
     pass
@@ -253,9 +255,9 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str, log_file: Path | No
         command = command[1:]
 
     if not command:
-        click.echo("Usage: secretgate wrap -- <command> [args...]")
-        click.echo("Example: secretgate wrap -- claude")
-        return
+        click.echo("Usage: secretgate wrap -- <command> [args...]", err=True)
+        click.echo("Example: secretgate wrap -- claude", err=True)
+        ctx.exit(1)
 
     # Resolve log file path
     if log_file is None:

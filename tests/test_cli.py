@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from click.testing import CliRunner
 
+from secretgate import __version__
 from secretgate.cli import main
 
 
@@ -13,7 +14,7 @@ class TestVersion:
         runner = CliRunner()
         result = runner.invoke(main, ["--version"])
         assert result.exit_code == 0
-        assert "0.5.1" in result.output
+        assert __version__ in result.output
 
     def test_help(self):
         runner = CliRunner()
@@ -106,7 +107,7 @@ class TestWrapCommand:
     def test_wrap_no_command(self):
         runner = CliRunner()
         result = runner.invoke(main, ["wrap"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         assert "Usage" in result.output or "secretgate wrap" in result.output
 
     def test_wrap_help(self):
