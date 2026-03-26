@@ -12,6 +12,7 @@ from secretgate import __version__
 from secretgate.config import Config
 from secretgate.pipeline import Pipeline
 from secretgate.secrets.scanner import SecretScanner
+from secretgate.stats import Stats
 from secretgate.steps import AuditLogStep, SecretRedactionStep
 from secretgate.proxy import create_provider_router
 
@@ -112,10 +113,18 @@ def create_app(config: Config) -> FastAPI:
         ]
     )
 
+    # Shared stats instance
+    stats = Stats()
+
     # Health check
     @app.get("/health")
     async def health():
         return {"status": "ok", "version": __version__}
+
+    # Stats endpoint
+    @app.get("/stats")
+    async def get_stats():
+        return stats.snapshot()
 
     # Register provider routes (state.http_client is populated by lifespan before any request)
     for provider_config in config.providers.values():
