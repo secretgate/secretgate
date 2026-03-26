@@ -130,7 +130,33 @@ Layer **firewall rules + readonly env vars + hooks** for defense-in-depth:
 
 No single layer is perfect, but combined they make bypass extremely difficult.
 
+## Quick Start: `secretgate firewall show`
+
+Generate platform-specific firewall rules automatically:
+
+```bash
+# Auto-detect platform and generate rules
+secretgate firewall show
+
+# Specify the tool explicitly
+secretgate firewall show --tool iptables
+secretgate firewall show --tool nftables
+secretgate firewall show --tool pf
+
+# Only block specific LLM API domains
+secretgate firewall show -d api.anthropic.com -d api.openai.com
+
+# Restrict rules to a specific user
+secretgate firewall show --user developer
+
+# Custom proxy port
+secretgate firewall show -f 9090
+```
+
+Review the generated rules, then apply them with appropriate privileges.
+
 ## Related
 
 - [GitHub Issue #33](https://github.com/secretgate/secretgate/issues/33) — Tracking issue for hardening
 - `secretgate wrap` — Already sets proxy env vars automatically
+- `secretgate firewall show` — Generate firewall rules for your platform

@@ -116,6 +116,36 @@ def serve(
     uvicorn.run(app, host=cfg.host, port=cfg.port, log_level=log_level)
 
 
+# Binary file extensions to skip when recursing directories
+_BINARY_EXTENSIONS = frozenset({
+    ".pyc", ".pyo", ".so", ".o", ".a", ".dylib", ".dll", ".exe",
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svg",
+    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
+    ".whl", ".egg", ".class", ".jar",
+    ".db", ".sqlite", ".sqlite3",
+    ".woff", ".woff2", ".ttf", ".eot",
+    ".pdf", ".doc", ".docx",
+    ".mp3", ".mp4", ".wav", ".avi", ".mov",
+})
+
+
+def _resolve_file_args(paths: tuple[str, ...]) -> list[str]:
+    """Expand directories into file lists, skipping binary and hidden files."""
+    result: list[str] = []
+    for p in paths:
+        path = Path(p)
+        if path.is_file():
+            result.append(str(path))
+        elif path.is_dir():
+            for child in sorted(path.rglob("*")):
+                if child.is_file() and not any(
+                    part.startswith(".") for part in child.relative_to(path).parts
+                ):
+                    if child.suffix.lower() not in _BINARY_EXTENSIONS:
+                        result.append(str(child))
+    return result
+
+
 @main.command()
 @click.option(
     "--detect-secrets",
@@ -157,9 +187,13 @@ def scan(use_detect_secrets: bool, no_entropy: bool, no_known_values: bool, file
     total_matches = []
 
     if files:
-        for filepath in files:
-            with open(filepath) as f:
-                text = f.read()
+        resolved_files = _resolve_file_args(files)
+        for filepath in resolved_files:
+            try:
+                with open(filepath) as f:
+                    text = f.read()
+            except (UnicodeDecodeError, IsADirectoryError, PermissionError):
+                continue  # skip binary files and unreadable entries
             matches = scanner.scan(text)
             for m in matches:
                 preview = m.value[:8] + "..." if len(m.value) > 8 else m.value
@@ -517,6 +551,58 @@ def ca_trust():
         click.echo(f"  export NODE_EXTRA_CA_CERTS={cert_path}")
         click.echo()
         click.echo("Or install the CA system-wide (no env vars needed):")
+
+
+@main.group()
+def firewall():
+    """Generate firewall rules to prevent proxy bypass (issue #33)."""
+    pass
+
+
+@firewall.command("show")
+@click.option(
+    "--forward-proxy-port",
+    "-f",
+    default=8083,
+    type=int,
+    help="Forward proxy port",
+)
+@click.option("--user", "-u", default=None, help="Restrict rules to this OS user")
+@click.option(
+    "--domain",
+    "-d",
+    multiple=True,
+    help="Only block specific domains (can be repeated; default: block all port 443)",
+)
+@click.option(
+    "--tool",
+    type=click.Choice(["iptables", "nftables", "pf", "auto"]),
+    default="auto",
+    help="Firewall tool (default: auto-detect)",
+)
+def firewall_show(forward_proxy_port: int, user: str | None, domain: tuple, tool: str):
+    """Print firewall rules for the current platform.
+
+    These rules block direct outbound HTTPS connections, forcing all
+    traffic through the secretgate proxy. This prevents AI tools from
+    bypassing the proxy by unsetting env vars.
+
+    \b
+    Examples:
+        secretgate firewall show
+        secretgate firewall show --tool iptables
+        secretgate firewall show -d api.anthropic.com -d api.openai.com
+    """
+    from secretgate.firewall import generate_rules
+
+    domains = list(domain) if domain else None
+    rules = generate_rules(
+        proxy_port=forward_proxy_port,
+        user=user,
+        domains=domains,
+        tool=None if tool == "auto" else tool,
+    )
+    click.echo(rules)
 
 
 if __name__ == "__main__":
