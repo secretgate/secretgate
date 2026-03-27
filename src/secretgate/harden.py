@@ -77,7 +77,10 @@ def generate_remove(
         )
     elif tool == "nftables":
         return (
-            "#!/usr/sbin/nft -f\n# Remove secretgate nftables rules\ndelete table inet secretgate\n"
+            "#!/usr/bin/env bash\n"
+            "# Remove secretgate nftables rules\n"
+            "nft delete table inet secretgate 2>/dev/null || true\n"
+            'echo "[secretgate] Firewall rules removed."\n'
         )
     elif tool == "pf":
         return (
@@ -176,31 +179,36 @@ def _generate_nftables(
     else:
         skuid = "meta skuid != 0"
 
+    nft_rules = "\n".join(
+        [
+            "table inet secretgate {",
+            "    chain output {",
+            "        type filter hook output priority 0; policy accept;",
+            "",
+            "        # Allow loopback",
+            "        oifname lo accept",
+            "",
+            "        # Block all direct outbound HTTPS",
+            f"        tcp dport 443 {skuid} drop",
+            "    }",
+            "}",
+        ]
+    )
+
     lines = [
-        "#!/usr/sbin/nft -f",
+        "#!/usr/bin/env bash",
         "# secretgate firewall hardening (nftables)",
+        "# Forces all outbound HTTPS through the local proxy.",
+        "# Run as root: sudo bash <this-script>",
+        "set -euo pipefail",
         "",
-        "table inet secretgate {",
-        "    chain output {",
-        "        type filter hook output priority 0; policy accept;",
+        "nft -f - <<'NFT'",
+        nft_rules,
+        "NFT",
         "",
-        "        # Allow loopback",
-        "        oifname lo accept",
-        "",
-    ]
-
-    if domains:
-        # nftables can match on destination IP; user must resolve domains first
-        lines.append("        # Block direct HTTPS for specific domains")
-        lines.append("        # NOTE: resolve domain IPs and add them to the set below")
-        lines.append(f"        tcp dport 443 {skuid} drop")
-    else:
-        lines.append("        # Block all direct outbound HTTPS")
-        lines.append(f"        tcp dport 443 {skuid} drop")
-
-    lines += [
-        "    }",
-        "}",
+        'echo "[secretgate] Firewall rules installed (nftables)."',
+        f'echo "[secretgate] All direct HTTPS blocked — traffic must go through localhost:{proxy_port}"',
+        'echo "[secretgate] To remove: secretgate harden --remove | sudo bash"',
     ]
 
     return "\n".join(lines) + "\n"
@@ -215,22 +223,39 @@ def _generate_pf(
 
     resolved_user = user or getpass.getuser()
 
+    anchor_content = "\n".join(
+        [
+            f"pass out proto tcp from any to 127.0.0.1 port {proxy_port}",
+            f"block out proto tcp from any to any port 443 user {resolved_user}",
+        ]
+    )
+
     lines = [
+        "#!/usr/bin/env bash",
         "# secretgate firewall hardening (macOS pf)",
-        "# Save to /etc/pf.anchors/secretgate and load with:",
-        "#   echo 'anchor \"secretgate\"' | sudo tee -a /etc/pf.conf",
-        '#   echo \'load anchor "secretgate" from "/etc/pf.anchors/secretgate"\''
-        " | sudo tee -a /etc/pf.conf",
-        "#   sudo pfctl -f /etc/pf.conf",
-        "#   sudo pfctl -e",
+        "# Forces all outbound HTTPS through the local proxy.",
+        "# Run as root: sudo bash <this-script>",
+        "set -euo pipefail",
         "",
-        f"# Allow traffic to local proxy on port {proxy_port}",
-        f"pass out proto tcp from any to 127.0.0.1 port {proxy_port}",
+        'ANCHOR_FILE="/etc/pf.anchors/secretgate"',
         "",
-        "# Block direct outbound HTTPS",
-        f"block out proto tcp from any to any port 443 user {resolved_user}",
+        "# Write pf anchor rules",
+        "cat > \"$ANCHOR_FILE\" <<'PF'",
+        anchor_content,
+        "PF",
         "",
-        "# To remove: sudo pfctl -a secretgate -F all",
+        "# Add anchor to pf.conf if not already present",
+        "if ! grep -q 'anchor \"secretgate\"' /etc/pf.conf; then",
+        "    echo 'anchor \"secretgate\"' >> /etc/pf.conf",
+        '    echo \'load anchor "secretgate" from "/etc/pf.anchors/secretgate"\' >> /etc/pf.conf',
+        "fi",
+        "",
+        'pfctl -a secretgate -f "$ANCHOR_FILE"',
+        "pfctl -e 2>/dev/null || true",
+        "",
+        'echo "[secretgate] Firewall rules installed (pf)."',
+        f'echo "[secretgate] All direct HTTPS blocked for user {resolved_user} — traffic must go through localhost:{proxy_port}"',
+        'echo "[secretgate] To remove: secretgate harden --remove | sudo bash"',
     ]
 
     return "\n".join(lines) + "\n"

@@ -37,6 +37,8 @@ class TestGenerateRules:
 
     def test_nftables_default(self):
         rules = generate_rules(tool="nftables")
+        assert "#!/usr/bin/env bash" in rules
+        assert "nft -f -" in rules
         assert "table inet secretgate" in rules
         assert "tcp dport 443" in rules
         assert "drop" in rules
@@ -47,9 +49,11 @@ class TestGenerateRules:
 
     def test_pf_default(self):
         rules = generate_rules(tool="pf")
+        assert "#!/usr/bin/env bash" in rules
         assert "block out proto tcp" in rules
         assert "port 443" in rules
         assert "port 8083" in rules
+        assert "pfctl" in rules
 
     def test_pf_resolves_username(self):
         import getpass
@@ -84,7 +88,7 @@ class TestGenerateRemove:
 
     def test_nftables_remove(self):
         script = generate_remove(tool="nftables")
-        assert "delete table" in script
+        assert "nft delete table" in script
 
     def test_pf_remove(self):
         script = generate_remove(tool="pf")
