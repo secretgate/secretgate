@@ -98,6 +98,125 @@ def generate_remove(
     return f"# No removal script for: {tool}\n"
 
 
+def apply_rules(uid: int, tool: str | None = None) -> str:
+    """Apply firewall rules blocking port 443 for the given UID.
+
+    Uses sudo internally. Returns the tool name used (needed for removal).
+    """
+    import subprocess
+
+    if tool is None:
+        tool = _detect_tool()
+
+    if tool == "iptables":
+        # Allow loopback
+        if (
+            subprocess.run(
+                ["sudo", "iptables", "-C", "OUTPUT", "-o", "lo", "-j", "ACCEPT"],
+                capture_output=True,
+            ).returncode
+            != 0
+        ):
+            subprocess.run(
+                ["sudo", "iptables", "-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"],
+                check=True,
+            )
+        # Block port 443 for this UID
+        subprocess.run(
+            [
+                "sudo",
+                "iptables",
+                "-A",
+                "OUTPUT",
+                "-p",
+                "tcp",
+                "--dport",
+                "443",
+                "-m",
+                "owner",
+                "--uid-owner",
+                str(uid),
+                "-j",
+                "DROP",
+            ],
+            check=True,
+        )
+    elif tool == "nftables":
+        nft_config = (
+            "table inet secretgate {\n"
+            "    chain output {\n"
+            "        type filter hook output priority 0; policy accept;\n"
+            "        oifname lo accept\n"
+            f"        tcp dport 443 meta skuid {uid} drop\n"
+            "    }\n"
+            "}\n"
+        )
+        subprocess.run(["sudo", "nft", "-f", "-"], input=nft_config.encode(), check=True)
+    elif tool == "pf":
+        import getpass
+
+        username = getpass.getuser()
+        anchor = (
+            "pass out proto tcp from any to 127.0.0.1 port 8083\n"
+            f"block out proto tcp from any to any port 443 user {username}\n"
+        )
+        anchor_path = "/etc/pf.anchors/secretgate"
+        subprocess.run(
+            ["sudo", "tee", anchor_path],
+            input=anchor.encode(),
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["sudo", "pfctl", "-a", "secretgate", "-f", anchor_path],
+            check=True,
+        )
+        subprocess.run(["sudo", "pfctl", "-e"], capture_output=True)
+    else:
+        raise RuntimeError(f"Cannot apply rules for platform: {tool}")
+
+    return tool
+
+
+def remove_rules(tool: str | None = None) -> None:
+    """Remove firewall rules. Uses sudo internally."""
+    import subprocess
+
+    if tool is None:
+        tool = _detect_tool()
+
+    if tool == "iptables":
+        # Remove all secretgate DROP rules for port 443
+        while True:
+            result = subprocess.run(
+                [
+                    "sudo",
+                    "iptables",
+                    "-D",
+                    "OUTPUT",
+                    "-p",
+                    "tcp",
+                    "--dport",
+                    "443",
+                    "-j",
+                    "DROP",
+                ],
+                capture_output=True,
+            )
+            if result.returncode != 0:
+                break
+    elif tool == "nftables":
+        subprocess.run(
+            ["sudo", "nft", "delete", "table", "inet", "secretgate"],
+            capture_output=True,
+        )
+    elif tool == "pf":
+        subprocess.run(
+            ["sudo", "pfctl", "-a", "secretgate", "-F", "all"],
+            capture_output=True,
+        )
+
+
 def _detect_tool() -> str:
     """Detect the best firewall tool for this platform."""
     import shutil
