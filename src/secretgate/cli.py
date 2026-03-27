@@ -519,5 +519,93 @@ def ca_trust():
         click.echo("Or install the CA system-wide (no env vars needed):")
 
 
+@main.command()
+@click.option(
+    "--forward-proxy-port",
+    "-f",
+    default=8083,
+    type=int,
+    help="Proxy port to use in generated scripts",
+)
+@click.option(
+    "--output-dir",
+    "-o",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write scripts to this directory (otherwise prints to stdout)",
+)
+def harden(forward_proxy_port: int, output_dir: Path | None):
+    """Generate hardening scripts to prevent AI tools from bypassing the proxy.
+
+    Outputs platform-specific firewall rules, readonly env var snippets,
+    and Claude Code hook configurations.
+
+    \b
+    Examples:
+        secretgate harden
+        secretgate harden -o ~/.secretgate/harden
+        secretgate harden -f 9000
+    """
+    from secretgate.harden import print_harden_guide
+
+    print_harden_guide(proxy_port=forward_proxy_port, output_dir=str(output_dir) if output_dir else None)
+
+
+@main.command()
+@click.option(
+    "--forward-proxy-port",
+    "-f",
+    default=8083,
+    type=int,
+    help="Forward proxy port to check",
+)
+@click.option("--port", "-p", default=8085, type=int, help="Reverse proxy port to check")
+@click.option("--json-output", "json_out", is_flag=True, help="Output as JSON")
+def status(forward_proxy_port: int, port: int, json_out: bool):
+    """Check if secretgate proxy instances are running and reachable.
+
+    \b
+    Examples:
+        secretgate status
+        secretgate status --json
+        secretgate status -f 9000 -p 9001
+    """
+    import json
+    import socket
+
+    results: dict[str, dict] = {}
+
+    for name, check_port in [("reverse_proxy", port), ("forward_proxy", forward_proxy_port)]:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1.0)
+            sock.connect(("127.0.0.1", check_port))
+            sock.close()
+            results[name] = {"port": check_port, "status": "running"}
+        except (ConnectionRefusedError, OSError):
+            sock.close()
+            results[name] = {"port": check_port, "status": "stopped"}
+
+    # Try health endpoint on reverse proxy
+    if results["reverse_proxy"]["status"] == "running":
+        try:
+            import urllib.request
+
+            resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2)
+            health = json.loads(resp.read())
+            results["reverse_proxy"]["version"] = health.get("version", "unknown")
+        except Exception:
+            pass
+
+    if json_out:
+        click.echo(json.dumps(results, indent=2))
+    else:
+        for name, info in results.items():
+            label = name.replace("_", " ").title()
+            status_icon = "✓" if info["status"] == "running" else "✗"
+            version = f" (v{info.get('version', '?')})" if "version" in info else ""
+            click.echo(f"  {status_icon} {label}: {info['status']} on port {info['port']}{version}")
+
+
 if __name__ == "__main__":
     main()

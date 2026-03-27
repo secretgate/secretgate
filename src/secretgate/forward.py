@@ -408,6 +408,28 @@ class _ConnectionHandler:
                 await self._send_error(client_writer, 400, "Bad Request", "Malformed HTTP request")
                 return
 
+            # Detect WebSocket upgrade requests (RFC 6455) — these cannot be
+            # scanned because after the 101 handshake the connection switches
+            # to a binary frame protocol.  Pass the upgrade through to upstream
+            # and then switch to a raw bidirectional pipe.  (Addresses #9.)
+            upgrade_header = req_headers.get("upgrade", "").lower()
+            if upgrade_header == "websocket":
+                logger.warning(
+                    "websocket_upgrade_passthrough",
+                    host=host,
+                    msg="WebSocket traffic is not scanned for secrets",
+                )
+                # Forward the upgrade request (including any body bytes already read)
+                upstream_writer.write(req_header_data)
+                await upstream_writer.drain()
+                # Bidirectional pipe for the rest of the connection
+                await asyncio.gather(
+                    self._pipe(client_reader, upstream_writer),
+                    self._pipe(upstream_reader, client_writer),
+                    return_exceptions=True,
+                )
+                return
+
             # Read the request body
             content_length_str = req_headers.get("content-length")
             req_transfer = req_headers.get("transfer-encoding", "").lower()
