@@ -226,17 +226,33 @@ def _find_available_port(preferred: int, max_attempts: int = 20) -> int:
     help="Log file path (default: ~/.secretgate/wrap.log, use '-' to disable)",
 )
 @click.option("--verbose", "-v", is_flag=True, help="Also stream proxy logs to stderr")
+@click.option(
+    "--harden",
+    is_flag=True,
+    help="Apply firewall rules to block direct HTTPS (requires sudo)",
+)
 @click.pass_context
-def wrap(ctx, forward_proxy_port: int, port: int, mode: str, log_file: Path | None, verbose: bool):
+def wrap(
+    ctx,
+    forward_proxy_port: int,
+    port: int,
+    mode: str,
+    log_file: Path | None,
+    verbose: bool,
+    harden: bool,
+):
     """Run a command with all traffic routed through secretgate.
 
     Starts the forward proxy in the background, sets proxy env vars,
     and runs the given command. Stops the proxy when the command exits.
 
+    With --harden, the proxy runs as root and firewall rules block direct
+    HTTPS for the current user. Requires sudo.
+
     \b
     Examples:
         secretgate wrap -- claude
-        secretgate wrap -- curl https://example.com
+        secretgate wrap --harden -- claude
         secretgate wrap --mode audit -- bash
         secretgate wrap -- git push
     """
@@ -258,6 +274,19 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str, log_file: Path | No
         click.echo("Usage: secretgate wrap -- <command> [args...]", err=True)
         click.echo("Example: secretgate wrap -- claude", err=True)
         ctx.exit(1)
+
+    # --harden: verify sudo access upfront
+    current_uid = os.getuid()
+    firewall_tool = None
+    if harden:
+        if sys.platform == "win32":
+            click.echo("Error: --harden is not supported on Windows", err=True)
+            ctx.exit(1)
+        # Check sudo works (may prompt for password)
+        check = subprocess.run(["sudo", "-v"], capture_output=True)
+        if check.returncode != 0:
+            click.echo("Error: --harden requires sudo access", err=True)
+            ctx.exit(1)
 
     # Resolve log file path
     if log_file is None:
@@ -290,7 +319,8 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str, log_file: Path | No
     # Start secretgate in background
     proxy_url = f"http://localhost:{forward_proxy_port}"
     click.echo(
-        f"Starting secretgate (port {port}, forward proxy {forward_proxy_port}, mode {mode})..."
+        f"Starting secretgate (port {port}, forward proxy {forward_proxy_port}, mode {mode}"
+        f"{', hardened' if harden else ''})..."
     )
 
     # On Windows, create a new process group so we can kill the entire tree
@@ -307,6 +337,11 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str, log_file: Path | No
         if secretgate_bin != sys.executable
         else [sys.executable, "-m", "secretgate", "serve"]
     )
+
+    # --harden: run proxy as root so firewall rules don't block it
+    if harden:
+        server_cmd = ["sudo", "--preserve-env=HOME", *server_cmd]
+
     # Set up log file for server output
     log_fh = None
     if log_path is not None:
@@ -402,6 +437,21 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str, log_file: Path | No
     if log_path is not None:
         click.echo(f"Logs: {log_path}")
 
+    # --harden: apply firewall rules now that proxy is running
+    if harden:
+        from secretgate.harden import apply_rules, remove_rules
+
+        try:
+            firewall_tool = apply_rules(uid=current_uid)
+            click.echo(
+                f"[secretgate] Firewall active ({firewall_tool}) — "
+                f"direct HTTPS blocked for UID {current_uid}"
+            )
+        except Exception as e:
+            click.echo(f"Error applying firewall rules: {e}", err=True)
+            _cleanup_server()
+            return
+
     # Run the command with proxy env vars
     env = os.environ.copy()
     env.update(
@@ -424,6 +474,15 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str, log_file: Path | No
     except KeyboardInterrupt:
         pass
     finally:
+        if harden and firewall_tool:
+            try:
+                from secretgate.harden import remove_rules
+
+                remove_rules(tool=firewall_tool)
+                click.echo("[secretgate] Firewall rules removed.")
+            except Exception as e:
+                click.echo(f"Warning: failed to remove firewall rules: {e}", err=True)
+                click.echo("Run: secretgate harden --remove | sudo bash", err=True)
         _cleanup_server()
         click.echo("secretgate stopped.")
 
@@ -517,6 +576,84 @@ def ca_trust():
         click.echo(f"  export NODE_EXTRA_CA_CERTS={cert_path}")
         click.echo()
         click.echo("Or install the CA system-wide (no env vars needed):")
+
+
+@main.command()
+@click.option(
+    "--forward-proxy-port",
+    "-f",
+    default=8083,
+    type=int,
+    help="Proxy port to allow in generated rules",
+)
+@click.option(
+    "--tool",
+    type=click.Choice(["iptables", "nftables", "pf", "windows", "auto"]),
+    default="auto",
+    help="Firewall tool (default: auto-detect)",
+)
+@click.option(
+    "--domain",
+    "-d",
+    multiple=True,
+    help="Only block specific domains (can be repeated; default: block all port 443)",
+)
+@click.option("--user", "-u", default=None, help="Restrict rules to this OS user")
+@click.option("--remove", is_flag=True, help="Generate removal commands instead")
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write script to file instead of stdout",
+)
+def harden(
+    forward_proxy_port: int,
+    tool: str,
+    domain: tuple[str, ...],
+    user: str | None,
+    remove: bool,
+    output: Path | None,
+):
+    """Generate firewall rules to prevent AI tools from bypassing the proxy.
+
+    Produces platform-specific rules that block direct outbound HTTPS,
+    forcing all traffic through secretgate. The proxy provides scanning,
+    redaction, and audit logging.
+
+    \b
+    Examples:
+        secretgate harden                            # auto-detect platform
+        secretgate harden --tool iptables            # specific tool
+        secretgate harden -d api.anthropic.com       # block specific domains
+        secretgate harden --remove                   # generate removal commands
+        secretgate harden -o firewall.sh             # write to file
+    """
+    from secretgate.harden import generate_remove, generate_rules
+
+    resolved_tool = None if tool == "auto" else tool
+    domains = list(domain) if domain else None
+
+    try:
+        if remove:
+            script = generate_remove(tool=resolved_tool)
+        else:
+            script = generate_rules(
+                proxy_port=forward_proxy_port,
+                tool=resolved_tool,
+                domains=domains,
+                user=user,
+            )
+    except ValueError as e:
+        raise click.ClickException(str(e))
+
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(script)
+        output.chmod(0o755)
+        click.echo(f"Script written to {output}")
+    else:
+        click.echo(script, nl=False)
 
 
 if __name__ == "__main__":
