@@ -519,5 +519,83 @@ def ca_trust():
         click.echo("Or install the CA system-wide (no env vars needed):")
 
 
+@main.command()
+@click.option(
+    "--forward-proxy-port",
+    "-f",
+    default=8083,
+    type=int,
+    help="Proxy port to allow in generated rules",
+)
+@click.option(
+    "--tool",
+    type=click.Choice(["iptables", "nftables", "pf", "windows", "auto"]),
+    default="auto",
+    help="Firewall tool (default: auto-detect)",
+)
+@click.option(
+    "--domain",
+    "-d",
+    multiple=True,
+    help="Only block specific domains (can be repeated; default: block all port 443)",
+)
+@click.option("--user", "-u", default=None, help="Restrict rules to this OS user")
+@click.option("--remove", is_flag=True, help="Generate removal commands instead")
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write script to file instead of stdout",
+)
+def harden(
+    forward_proxy_port: int,
+    tool: str,
+    domain: tuple[str, ...],
+    user: str | None,
+    remove: bool,
+    output: Path | None,
+):
+    """Generate firewall rules to prevent AI tools from bypassing the proxy.
+
+    Produces platform-specific rules that block direct outbound HTTPS,
+    forcing all traffic through secretgate. The proxy provides scanning,
+    redaction, and audit logging.
+
+    \b
+    Examples:
+        secretgate harden                            # auto-detect platform
+        secretgate harden --tool iptables            # specific tool
+        secretgate harden -d api.anthropic.com       # block specific domains
+        secretgate harden --remove                   # generate removal commands
+        secretgate harden -o firewall.sh             # write to file
+    """
+    from secretgate.harden import generate_remove, generate_rules
+
+    resolved_tool = None if tool == "auto" else tool
+    domains = list(domain) if domain else None
+
+    try:
+        if remove:
+            script = generate_remove(tool=resolved_tool)
+        else:
+            script = generate_rules(
+                proxy_port=forward_proxy_port,
+                tool=resolved_tool,
+                domains=domains,
+                user=user,
+            )
+    except ValueError as e:
+        raise click.ClickException(str(e))
+
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(script)
+        output.chmod(0o755)
+        click.echo(f"Script written to {output}")
+    else:
+        click.echo(script, nl=False)
+
+
 if __name__ == "__main__":
     main()
