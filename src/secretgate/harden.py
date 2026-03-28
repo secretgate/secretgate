@@ -152,6 +152,14 @@ def apply_rules(uid: int, tool: str | None = None) -> str:
             "}\n"
         )
         subprocess.run(["sudo", "nft", "-f", "-"], input=nft_config.encode(), check=True)
+        # Verify rules actually took effect (nftables silently fails on WSL2)
+        verify = subprocess.run(
+            ["sudo", "nft", "list", "table", "inet", "secretgate"],
+            capture_output=True,
+        )
+        if verify.returncode != 0:
+            # Fall back to iptables
+            return apply_rules(uid=uid, tool="iptables")
     elif tool == "pf":
         import getpass
 
