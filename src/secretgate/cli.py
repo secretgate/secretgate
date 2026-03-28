@@ -226,11 +226,7 @@ def _find_available_port(preferred: int, max_attempts: int = 20) -> int:
     help="Log file path (default: ~/.secretgate/wrap.log, use '-' to disable)",
 )
 @click.option("--verbose", "-v", is_flag=True, help="Also stream proxy logs to stderr")
-@click.option(
-    "--harden",
-    is_flag=True,
-    help="Apply firewall rules to block direct HTTPS (requires sudo)",
-)
+@click.option("--no-harden", is_flag=True, help="Disable network isolation even if available")
 @click.pass_context
 def wrap(
     ctx,
@@ -239,21 +235,21 @@ def wrap(
     mode: str,
     log_file: Path | None,
     verbose: bool,
-    harden: bool,
+    no_harden: bool,
 ):
     """Run a command with all traffic routed through secretgate.
 
     Starts the forward proxy in the background, sets proxy env vars,
     and runs the given command. Stops the proxy when the command exits.
 
-    With --harden, the command runs in an isolated network namespace
-    where only the proxy is reachable. Direct HTTPS is blocked at the
-    kernel level. No sudo required. Other terminals are unaffected.
+    If slirp4netns is installed, the command automatically runs in an
+    isolated network namespace where only the proxy is reachable.
+    Use --no-harden to disable this.
 
     \b
     Examples:
         secretgate wrap -- claude
-        secretgate wrap --harden -- claude
+        secretgate wrap --no-harden -- claude
         secretgate wrap --mode audit -- bash
         secretgate wrap -- git push
     """
@@ -277,18 +273,21 @@ def wrap(
         click.echo("Example: secretgate wrap -- claude", err=True)
         ctx.exit(1)
 
-    # --harden: check dependencies upfront
-    if harden:
-        if sys.platform == "win32":
-            click.echo("Error: --harden is not supported on Windows", err=True)
-            ctx.exit(1)
-        if not shutil.which("slirp4netns"):
-            click.echo(
-                "Error: --harden requires slirp4netns.\n"
-                "Install it with: sudo apt install slirp4netns",
-                err=True,
-            )
-            ctx.exit(1)
+    # Auto-detect network isolation support
+    harden = False
+    if no_harden:
+        pass  # explicitly disabled
+    elif sys.platform == "win32":
+        pass  # not supported on Windows
+    elif shutil.which("slirp4netns"):
+        harden = True
+    else:
+        click.echo(
+            "Tip: install slirp4netns for network isolation "
+            "(prevents proxy bypass)\n"
+            "     sudo apt install slirp4netns",
+            err=True,
+        )
 
     # Resolve log file path
     if log_file is None:
