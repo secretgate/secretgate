@@ -11,6 +11,118 @@ from __future__ import annotations
 
 import platform
 import re
+import shutil
+
+
+def run_in_namespace(
+    command: list[str],
+    env: dict[str, str],
+    proxy_port: int,
+) -> int:
+    """Run a command in a network namespace with only proxy access.
+
+    Uses ``unshare --user --net`` + ``slirp4netns`` for rootless,
+    per-process network isolation.  The child can only reach the
+    host proxy via the slirp4netns gateway (10.0.2.2).  Direct
+    outbound HTTPS is blocked by iptables rules *inside* the
+    namespace.  No sudo required.
+
+    Returns the child process exit code.
+    """
+    import subprocess
+
+    if not shutil.which("slirp4netns"):
+        raise RuntimeError(
+            "slirp4netns is required for --harden but not found.\n"
+            "Install it with: sudo apt install slirp4netns"
+        )
+
+    # Shell script that runs inside the namespace.
+    # It waits for slirp4netns to create tap0, applies firewall
+    # rules, then execs the user's command.
+    ns_script = f"""\
+set -e
+
+# Wait for slirp4netns to create the tap0 interface (up to 5s)
+for _i in $(seq 50); do
+    if ip link show tap0 >/dev/null 2>&1; then break; fi
+    sleep 0.1
+done
+
+if ! ip link show tap0 >/dev/null 2>&1; then
+    echo "[secretgate] Error: network namespace setup failed (tap0 not created)" >&2
+    exit 1
+fi
+
+# Firewall rules inside the namespace:
+# - Allow loopback (needed for internal comms)
+# - Allow proxy gateway (10.0.2.2:{proxy_port})
+# - Block direct HTTPS so the child cannot bypass the proxy
+iptables -A OUTPUT -o lo -j ACCEPT
+iptables -A OUTPUT -d 10.0.2.2 -p tcp --dport {proxy_port} -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 443 -j REJECT --reject-with tcp-reset
+
+# Run the user's command
+exec "$@"
+"""
+
+    # Point proxy env vars at the slirp4netns gateway instead of localhost
+    ns_env = env.copy()
+    gateway_proxy = f"http://10.0.2.2:{proxy_port}"
+    ns_env.update(
+        {
+            "https_proxy": gateway_proxy,
+            "http_proxy": gateway_proxy,
+            "HTTPS_PROXY": gateway_proxy,
+            "HTTP_PROXY": gateway_proxy,
+        }
+    )
+
+    # Start the child in a new user + network namespace
+    child = subprocess.Popen(
+        [
+            "unshare",
+            "--user",
+            "--map-root-user",
+            "--net",
+            "bash",
+            "-c",
+            ns_script,
+            "--",
+            *command,
+        ],
+        env=ns_env,
+    )
+
+    # Attach slirp4netns to give the namespace network access via a TAP device.
+    # The host is reachable at 10.0.2.2 (default gateway).
+    slirp = subprocess.Popen(
+        [
+            "slirp4netns",
+            "--configure",
+            "--mtu=65520",
+            str(child.pid),
+            "tap0",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    try:
+        return child.wait()
+    except KeyboardInterrupt:
+        child.terminate()
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+        return 130  # standard Ctrl+C exit code
+    finally:
+        slirp.terminate()
+        try:
+            slirp.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            slirp.kill()
 
 
 def validate_domain(domain: str) -> bool:

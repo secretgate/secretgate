@@ -246,8 +246,9 @@ def wrap(
     Starts the forward proxy in the background, sets proxy env vars,
     and runs the given command. Stops the proxy when the command exits.
 
-    With --harden, the proxy runs as root and firewall rules block direct
-    HTTPS for the current user. Requires sudo.
+    With --harden, the command runs in an isolated network namespace
+    where only the proxy is reachable. Direct HTTPS is blocked at the
+    kernel level. No sudo required. Other terminals are unaffected.
 
     \b
     Examples:
@@ -258,6 +259,7 @@ def wrap(
     """
     import atexit
     import os
+    import shutil
     import socket
     import subprocess
     import sys
@@ -275,17 +277,17 @@ def wrap(
         click.echo("Example: secretgate wrap -- claude", err=True)
         ctx.exit(1)
 
-    # --harden: verify sudo access upfront
-    current_uid = os.getuid()
-    firewall_tool = None
+    # --harden: check dependencies upfront
     if harden:
         if sys.platform == "win32":
             click.echo("Error: --harden is not supported on Windows", err=True)
             ctx.exit(1)
-        # Check sudo works (may prompt for password)
-        check = subprocess.run(["sudo", "-v"], capture_output=True)
-        if check.returncode != 0:
-            click.echo("Error: --harden requires sudo access", err=True)
+        if not shutil.which("slirp4netns"):
+            click.echo(
+                "Error: --harden requires slirp4netns.\n"
+                "Install it with: sudo apt install slirp4netns",
+                err=True,
+            )
             ctx.exit(1)
 
     # Resolve log file path
@@ -319,16 +321,13 @@ def wrap(
     # Start secretgate in background
     proxy_url = f"http://localhost:{forward_proxy_port}"
     click.echo(
-        f"Starting secretgate (port {port}, forward proxy {forward_proxy_port}, mode {mode}"
-        f"{', hardened' if harden else ''})..."
+        f"Starting secretgate (port {port}, forward proxy {forward_proxy_port}, mode {mode})..."
     )
 
     # On Windows, create a new process group so we can kill the entire tree
     popen_kwargs = {}
     if sys.platform == "win32":
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-
-    import shutil
 
     # Find the secretgate binary — prefer the same entry point that invoked us
     secretgate_bin = shutil.which("secretgate") or sys.executable
@@ -337,10 +336,6 @@ def wrap(
         if secretgate_bin != sys.executable
         else [sys.executable, "-m", "secretgate", "serve"]
     )
-
-    # --harden: run proxy as root so firewall rules don't block it
-    if harden:
-        server_cmd = ["sudo", "--preserve-env=HOME", *server_cmd]
 
     # Set up log file for server output
     log_fh = None
@@ -437,21 +432,6 @@ def wrap(
     if log_path is not None:
         click.echo(f"Logs: {log_path}")
 
-    # --harden: apply firewall rules now that proxy is running
-    if harden:
-        from secretgate.harden import apply_rules, remove_rules
-
-        try:
-            firewall_tool = apply_rules(uid=current_uid)
-            click.echo(
-                f"[secretgate] Firewall active ({firewall_tool}) — "
-                f"direct HTTPS blocked for UID {current_uid}"
-            )
-        except Exception as e:
-            click.echo(f"Error applying firewall rules: {e}", err=True)
-            _cleanup_server()
-            return
-
     # Run the command with proxy env vars
     env = os.environ.copy()
     env.update(
@@ -469,20 +449,22 @@ def wrap(
     )
 
     try:
-        result = subprocess.run(list(command), env=env)
-        raise SystemExit(result.returncode)
+        if harden:
+            from secretgate.harden import run_in_namespace
+
+            click.echo("[secretgate] Running in isolated network namespace")
+            returncode = run_in_namespace(
+                command=list(command),
+                env=env,
+                proxy_port=forward_proxy_port,
+            )
+            raise SystemExit(returncode)
+        else:
+            result = subprocess.run(list(command), env=env)
+            raise SystemExit(result.returncode)
     except KeyboardInterrupt:
         pass
     finally:
-        if harden and firewall_tool:
-            try:
-                from secretgate.harden import remove_rules
-
-                remove_rules(tool=firewall_tool)
-                click.echo("[secretgate] Firewall rules removed.")
-            except Exception as e:
-                click.echo(f"Warning: failed to remove firewall rules: {e}", err=True)
-                click.echo("Run: secretgate harden --remove | sudo bash", err=True)
         _cleanup_server()
         click.echo("secretgate stopped.")
 
