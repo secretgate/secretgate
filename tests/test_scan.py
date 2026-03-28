@@ -630,3 +630,90 @@ class TestFormatDetection:
         ).encode()
         _, alerts = redact_scanner.scan_body(body, "application/json")
         assert len(alerts) >= 1
+
+
+class TestStripModelContentEdgeCases:
+    """Additional edge cases for the _strip_model_content method."""
+
+    def test_strip_cohere_format(self):
+        """Cohere format: message + chat_history + preamble."""
+        from secretgate.scan import TextScanner
+        from secretgate.secrets.scanner import SecretScanner
+
+        scanner = SecretScanner(enable_entropy=False)
+        text_scanner = TextScanner(scanner, mode="audit")
+
+        import json
+
+        body = {
+            "message": "current user input with AKIAIOSFODNN7EXAMPLE",
+            "preamble": "system prompt with old content",
+            "chat_history": [
+                {"role": "USER", "message": "old user message"},
+                {"role": "CHATBOT", "message": "old bot response"},
+            ],
+        }
+        result = text_scanner._strip_model_content(json.dumps(body))
+        parsed = json.loads(result)
+        # Preamble should be blanked
+        assert parsed["preamble"] == ""
+        # Chat history messages should be blanked
+        assert parsed["chat_history"][0]["message"] == ""
+        assert parsed["chat_history"][1]["message"] == ""
+        # Current message should be preserved
+        assert "AKIAIOSFODNN7EXAMPLE" in parsed["message"]
+
+    def test_strip_gemini_format(self):
+        """Gemini format: contents + systemInstruction."""
+        from secretgate.scan import TextScanner
+        from secretgate.secrets.scanner import SecretScanner
+
+        scanner = SecretScanner(enable_entropy=False)
+        text_scanner = TextScanner(scanner, mode="audit")
+
+        import json
+
+        body = {
+            "systemInstruction": {
+                "parts": [{"text": "system prompt"}],
+            },
+            "contents": [
+                {"role": "user", "parts": [{"text": "old user message"}]},
+                {"role": "model", "parts": [{"text": "old model response"}]},
+                {"role": "user", "parts": [{"text": "current user input"}]},
+            ],
+        }
+        result = text_scanner._strip_model_content(json.dumps(body))
+        parsed = json.loads(result)
+        # systemInstruction should be blanked
+        assert parsed["systemInstruction"]["parts"][0]["text"] == ""
+        # Earlier messages should be blanked
+        assert parsed["contents"][0]["parts"][0]["text"] == ""
+        assert parsed["contents"][1]["parts"][0]["text"] == ""
+        # Last user turn should be preserved
+        assert parsed["contents"][2]["parts"][0]["text"] == "current user input"
+
+    def test_strip_non_json(self):
+        """Non-JSON text should be returned as-is."""
+        from secretgate.scan import TextScanner
+        from secretgate.secrets.scanner import SecretScanner
+
+        scanner = SecretScanner(enable_entropy=False)
+        text_scanner = TextScanner(scanner, mode="audit")
+
+        result = text_scanner._strip_model_content("this is just plain text")
+        assert result == "this is just plain text"
+
+    def test_strip_unrecognized_json(self):
+        """JSON that doesn't match any known format should be returned as-is."""
+        from secretgate.scan import TextScanner
+        from secretgate.secrets.scanner import SecretScanner
+        import json
+
+        scanner = SecretScanner(enable_entropy=False)
+        text_scanner = TextScanner(scanner, mode="audit")
+
+        body = {"some_random_key": "value", "another": [1, 2, 3]}
+        original = json.dumps(body)
+        result = text_scanner._strip_model_content(original)
+        assert result == original
