@@ -225,6 +225,15 @@ def remove_rules(tool: str | None = None) -> None:
         )
 
 
+def _is_wsl() -> bool:
+    """Detect if running under Windows Subsystem for Linux."""
+    try:
+        with open("/proc/version") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
 def _detect_tool() -> str:
     """Detect the best firewall tool for this platform."""
     import shutil
@@ -233,7 +242,8 @@ def _detect_tool() -> str:
     if system == "Darwin":
         return "pf"
     elif system == "Linux":
-        if shutil.which("nft"):
+        # nftables is present on WSL2 but doesn't actually enforce rules
+        if shutil.which("nft") and not _is_wsl():
             return "nftables"
         return "iptables"
     elif system == "Windows":
