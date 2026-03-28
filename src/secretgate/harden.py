@@ -213,6 +213,11 @@ def remove_rules(tool: str | None = None) -> None:
             )
             if result.returncode != 0:
                 break
+        # Clean up the loopback ACCEPT rule we added
+        subprocess.run(
+            ["sudo", "iptables", "-D", "OUTPUT", "-o", "lo", "-j", "ACCEPT"],
+            capture_output=True,
+        )
     elif tool == "nftables":
         subprocess.run(
             ["sudo", "nft", "delete", "table", "inet", "secretgate"],
