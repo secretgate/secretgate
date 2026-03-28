@@ -519,5 +519,146 @@ def ca_trust():
         click.echo("Or install the CA system-wide (no env vars needed):")
 
 
+@main.command()
+@click.option(
+    "--forward-proxy-port",
+    "-f",
+    default=8083,
+    type=int,
+    help="Forward proxy port to allow through firewall",
+)
+@click.option(
+    "--uid",
+    type=int,
+    default=None,
+    help="Restrict firewall rules to this UID (Linux only)",
+)
+@click.option(
+    "--user",
+    "username",
+    type=str,
+    default=None,
+    help="Restrict firewall rules to this username (macOS only)",
+)
+@click.option(
+    "--uninstall",
+    is_flag=True,
+    help="Generate uninstall script instead of install script",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Print the script without executing (default behavior)",
+)
+def harden(forward_proxy_port: int, uid: int | None, username: str | None, uninstall: bool, dry_run: bool):
+    """Generate firewall rules to prevent AI tools from bypassing the proxy.
+
+    Outputs a shell script that installs OS-level firewall rules (iptables
+    on Linux, pf on macOS) to block direct outbound HTTPS connections,
+    forcing all traffic through the secretgate forward proxy.
+
+    \b
+    Examples:
+        secretgate harden                          # Print install script
+        secretgate harden --uninstall              # Print uninstall script
+        secretgate harden | sudo bash              # Install directly
+        secretgate harden --uid $(id -u)           # Restrict to current user (Linux)
+        secretgate harden --user $(whoami)          # Restrict to current user (macOS)
+    """
+    from secretgate.harden import (
+        detect_os,
+        generate_iptables_rules,
+        generate_iptables_uninstall,
+        generate_pf_install_script,
+        generate_pf_uninstall_script,
+    )
+
+    os_type = detect_os()
+
+    if os_type == "linux":
+        if uninstall:
+            script = generate_iptables_uninstall(forward_proxy_port, uid)
+        else:
+            script = generate_iptables_rules(forward_proxy_port, uid)
+    elif os_type == "macos":
+        if uninstall:
+            script = generate_pf_uninstall_script()
+        else:
+            script = generate_pf_install_script(forward_proxy_port, username)
+    else:
+        click.echo(
+            "Unsupported OS. Firewall hardening is available on Linux (iptables) and macOS (pf).",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    click.echo(script)
+
+
+@main.command()
+@click.option(
+    "--forward-proxy-port",
+    "-f",
+    default=8083,
+    type=int,
+    help="Forward proxy port to check",
+)
+@click.option(
+    "--port",
+    "-p",
+    default=8085,
+    type=int,
+    help="Reverse proxy port to check",
+)
+def status(forward_proxy_port: int, port: int):
+    """Check if secretgate is running.
+
+    Probes the health endpoint and forward proxy port to determine
+    if secretgate is active and which components are running.
+
+    \b
+    Examples:
+        secretgate status
+        secretgate status --port 8080 --forward-proxy-port 9090
+    """
+    import socket
+
+    def _check_port(p: int) -> bool:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1.0)
+            sock.connect(("127.0.0.1", p))
+            sock.close()
+            return True
+        except (ConnectionRefusedError, OSError):
+            return False
+
+    # Check reverse proxy / API health
+    reverse_up = _check_port(port)
+    forward_up = _check_port(forward_proxy_port)
+
+    if not reverse_up and not forward_up:
+        click.echo("secretgate is not running.")
+        raise SystemExit(1)
+
+    click.echo("secretgate is running:")
+    if reverse_up:
+        # Try health endpoint
+        try:
+            import httpx
+            resp = httpx.get(f"http://127.0.0.1:{port}/health", timeout=2.0)
+            data = resp.json()
+            click.echo(f"  Reverse proxy:  :{port} ✓ (v{data.get('version', '?')})")
+        except Exception:
+            click.echo(f"  Reverse proxy:  :{port} ✓")
+    else:
+        click.echo(f"  Reverse proxy:  :{port} ✗")
+
+    if forward_up:
+        click.echo(f"  Forward proxy:  :{forward_proxy_port} ✓")
+    else:
+        click.echo(f"  Forward proxy:  :{forward_proxy_port} ✗")
+
+
 if __name__ == "__main__":
     main()
