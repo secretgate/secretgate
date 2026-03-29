@@ -127,6 +127,58 @@ secretgate wrap -f 9090 -- curl https://...  # custom proxy port
 alias claude-safe='secretgate wrap -- claude'
 ```
 
+## Network isolation (hardening)
+
+By default, `secretgate wrap` relies on `https_proxy` env vars, which an AI tool
+could theoretically unset to bypass the proxy. When `slirp4netns` is installed,
+secretgate automatically runs the wrapped command in an isolated network namespace
+where only the proxy is reachable — direct HTTPS is blocked at the kernel level.
+
+```bash
+# Linux: install slirp4netns for automatic network isolation
+sudo apt install slirp4netns
+
+# Then just use wrap as normal — isolation is automatic
+secretgate wrap -- claude
+```
+
+**How it works:**
+- The child process runs in a separate network namespace (`unshare --user --net`)
+- A TAP device via `slirp4netns` provides controlled network access
+- `iptables` rules inside the namespace block port 443 (direct HTTPS)
+- The child can only reach the proxy — no direct internet access
+- No sudo required (uses unprivileged user namespaces)
+- Other terminals and processes are completely unaffected
+
+**Platform support:**
+
+| Platform | Method | Status |
+|---|---|---|
+| Linux (WSL2) | Network namespace + slirp4netns | Tested, auto-enabled |
+| Linux (native) | Network namespace + slirp4netns | Available, use `--harden` |
+| macOS | `sandbox-exec` (SBPL profile) | Available, use `--harden` |
+| Windows | Not available | Use `secretgate harden` for firewall rules |
+
+On untested platforms, secretgate shows a message explaining how to enable
+isolation. We welcome test reports — please open an issue at
+[github.com/secretgate/secretgate](https://github.com/secretgate/secretgate/issues)
+if you try `--harden` on native Linux or macOS.
+
+```bash
+secretgate wrap --harden -- claude      # force-enable on any platform
+secretgate wrap --no-harden -- claude   # force-disable
+```
+
+You can also generate standalone firewall rules (without the namespace approach):
+
+```bash
+secretgate harden                        # auto-detect platform
+secretgate harden --tool iptables        # specific tool
+secretgate harden --remove               # generate removal commands
+```
+
+See [docs/hardening.md](docs/hardening.md) for the full hardening guide.
+
 ## Compatible tools
 
 `secretgate wrap` works with any tool that respects the standard `https_proxy`
@@ -245,7 +297,7 @@ passthrough_domains:
 ### Limitations
 
 - **SSH git remotes** (`git@github.com:...`) bypass HTTP proxy — only HTTPS remotes are intercepted
-- **HTTP/2** not supported (HTTP/1.1 only — sufficient for git, curl, pip, npm)
+- **HTTP/2** supported via the h2 library (auto-negotiated via ALPN)
 - **Node.js apps** need `NODE_EXTRA_CA_CERTS` env var
 - **localhost** bypasses proxy by default — set `no_proxy=""` if needed
 - **Git packfile redact mode** falls back to block — packfile binaries can't be safely rewritten without corrupting checksums, so secrets in `git push` are always blocked (not redacted)
