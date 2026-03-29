@@ -183,17 +183,19 @@ def run_in_sandbox(
         os.unlink(profile_path)
 
 
-def can_harden() -> str | None:
+def can_harden() -> tuple[str | None, bool]:
     """Check if per-process network isolation is available.
 
-    Returns the method name ("namespace", "sandbox") or None.
+    Returns (method, tested) where method is "namespace", "sandbox",
+    or None, and tested indicates whether this platform has been
+    verified by the developers.
     """
     system = platform.system()
     if system == "Linux" and shutil.which("slirp4netns"):
-        return "namespace"
+        return "namespace", _is_wsl()  # only tested on WSL2 so far
     elif system == "Darwin" and shutil.which("sandbox-exec"):
-        return "sandbox"
-    return None
+        return "sandbox", False  # not yet tested on macOS
+    return None, False
 
 
 def validate_domain(domain: str) -> bool:

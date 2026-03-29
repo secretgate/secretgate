@@ -101,33 +101,50 @@ class TestGenerateRemove:
 
 
 class TestCanHarden:
-    def test_returns_string_or_none(self):
-        result = can_harden()
-        assert result in ("namespace", "sandbox", None)
+    def test_returns_tuple(self):
+        method, tested = can_harden()
+        assert method in ("namespace", "sandbox", None)
+        assert isinstance(tested, bool)
 
-    def test_linux_with_slirp4netns(self, monkeypatch):
+    def test_linux_with_slirp4netns_on_wsl(self, monkeypatch):
         monkeypatch.setattr("secretgate.harden.platform.system", lambda: "Linux")
         monkeypatch.setattr("secretgate.harden.shutil.which", lambda x: "/usr/bin/" + x)
-        assert can_harden() == "namespace"
+        monkeypatch.setattr("secretgate.harden._is_wsl", lambda: True)
+        method, tested = can_harden()
+        assert method == "namespace"
+        assert tested is True
+
+    def test_linux_with_slirp4netns_native(self, monkeypatch):
+        monkeypatch.setattr("secretgate.harden.platform.system", lambda: "Linux")
+        monkeypatch.setattr("secretgate.harden.shutil.which", lambda x: "/usr/bin/" + x)
+        monkeypatch.setattr("secretgate.harden._is_wsl", lambda: False)
+        method, tested = can_harden()
+        assert method == "namespace"
+        assert tested is False
 
     def test_linux_without_slirp4netns(self, monkeypatch):
         monkeypatch.setattr("secretgate.harden.platform.system", lambda: "Linux")
         monkeypatch.setattr("secretgate.harden.shutil.which", lambda x: None)
-        assert can_harden() is None
+        method, _tested = can_harden()
+        assert method is None
 
     def test_darwin_with_sandbox_exec(self, monkeypatch):
         monkeypatch.setattr("secretgate.harden.platform.system", lambda: "Darwin")
         monkeypatch.setattr("secretgate.harden.shutil.which", lambda x: "/usr/bin/" + x)
-        assert can_harden() == "sandbox"
+        method, tested = can_harden()
+        assert method == "sandbox"
+        assert tested is False
 
     def test_darwin_without_sandbox_exec(self, monkeypatch):
         monkeypatch.setattr("secretgate.harden.platform.system", lambda: "Darwin")
         monkeypatch.setattr("secretgate.harden.shutil.which", lambda x: None)
-        assert can_harden() is None
+        method, _tested = can_harden()
+        assert method is None
 
     def test_windows_returns_none(self, monkeypatch):
         monkeypatch.setattr("secretgate.harden.platform.system", lambda: "Windows")
-        assert can_harden() is None
+        method, _tested = can_harden()
+        assert method is None
 
 
 class TestSandboxProfile:

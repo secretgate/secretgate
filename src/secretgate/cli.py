@@ -226,6 +226,9 @@ def _find_available_port(preferred: int, max_attempts: int = 20) -> int:
     help="Log file path (default: ~/.secretgate/wrap.log, use '-' to disable)",
 )
 @click.option("--verbose", "-v", is_flag=True, help="Also stream proxy logs to stderr")
+@click.option(
+    "--harden", is_flag=True, help="Enable network isolation (auto-enabled on tested platforms)"
+)
 @click.option("--no-harden", is_flag=True, help="Disable network isolation even if available")
 @click.pass_context
 def wrap(
@@ -235,6 +238,7 @@ def wrap(
     mode: str,
     log_file: Path | None,
     verbose: bool,
+    harden: bool,
     no_harden: bool,
 ):
     """Run a command with all traffic routed through secretgate.
@@ -242,16 +246,17 @@ def wrap(
     Starts the forward proxy in the background, sets proxy env vars,
     and runs the given command. Stops the proxy when the command exits.
 
-    If slirp4netns is installed, the command automatically runs in an
-    isolated network namespace where only the proxy is reachable.
-    Use --no-harden to disable this.
+    Network isolation (--harden) runs the command in a restricted
+    environment where only the proxy is reachable. Auto-enabled on
+    tested platforms (WSL2). Use --harden to enable on other platforms,
+    --no-harden to disable everywhere.
 
     \b
     Examples:
         secretgate wrap -- claude
+        secretgate wrap --harden -- claude
         secretgate wrap --no-harden -- claude
         secretgate wrap --mode audit -- bash
-        secretgate wrap -- git push
     """
     import atexit
     import os
@@ -280,8 +285,19 @@ def wrap(
     if no_harden:
         pass  # explicitly disabled
     else:
-        harden_method = can_harden()
-        if harden_method is None and sys.platform != "win32":
+        method, tested = can_harden()
+        if method and (harden or tested):
+            # Auto-enable on tested platforms, or when explicitly requested
+            harden_method = method
+        elif method and not tested:
+            click.echo(
+                f"Network isolation available ({method}) but not yet verified "
+                f"on this platform.\n"
+                f"  Use --harden to enable it and please report results at:\n"
+                f"  https://github.com/secretgate/secretgate/issues",
+                err=True,
+            )
+        elif method is None and sys.platform != "win32":
             click.echo(
                 "Tip: install slirp4netns for network isolation "
                 "(prevents proxy bypass)\n"
