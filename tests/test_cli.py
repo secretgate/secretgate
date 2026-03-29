@@ -126,3 +126,62 @@ class TestServeCommand:
         assert "--mode" in result.output
         assert "--forward-proxy-port" in result.output
         assert "redact" in result.output
+
+
+class TestScanDirectoryAndJson:
+    """Tests for recursive directory scanning and --json output."""
+
+    def test_scan_directory_recursive(self, tmp_path):
+        """secretgate scan should recurse into directories."""
+        subdir = tmp_path / "src"
+        subdir.mkdir()
+        (subdir / "config.py").write_text("AWS_KEY=AKIAIOSFODNN7EXAMPLE\n")
+        (subdir / "clean.py").write_text("print('hello')\n")
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["scan", str(tmp_path)])
+        assert result.exit_code == 1
+        assert "secret(s) found" in result.output or '"count"' in result.output
+
+    def test_scan_skips_binary_extensions(self, tmp_path):
+        """Binary files (.pyc, .png, etc.) should be silently skipped."""
+        (tmp_path / "module.pyc").write_bytes(b"\x00\x01\x02AKIAIOSFODNN7EXAMPLE")
+        (tmp_path / "clean.txt").write_text("nothing here\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["scan", str(tmp_path)])
+        assert result.exit_code == 0
+        assert "No secrets found" in result.output
+
+    def test_scan_skips_git_directory(self, tmp_path):
+        """The .git directory should be pruned during walk."""
+        git_dir = tmp_path / ".git" / "objects"
+        git_dir.mkdir(parents=True)
+        (git_dir / "secret.txt").write_text("AKIAIOSFODNN7EXAMPLE\n")
+        (tmp_path / "readme.txt").write_text("safe content\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["scan", str(tmp_path)])
+        assert result.exit_code == 0
+
+    def test_scan_json_output(self, tmp_path):
+        import json
+
+        secret_file = tmp_path / "leak.env"
+        secret_file.write_text("API=AKIAIOSFODNN7EXAMPLE\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["scan", "--json", str(secret_file)])
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["count"] >= 1
+        assert data["secrets"][0]["service"] == "Amazon"
+        assert data["secrets"][0]["line"] == 1
+
+    def test_scan_json_clean(self, tmp_path):
+        import json
+
+        (tmp_path / "clean.txt").write_text("hello world\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["scan", "--json", str(tmp_path)])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["count"] == 0
+        assert data["secrets"] == []

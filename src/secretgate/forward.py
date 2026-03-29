@@ -17,26 +17,12 @@ import structlog
 
 from secretgate.certs import CertAuthority
 from secretgate.h2_handler import H2ConnectionHandler
+from secretgate.patterns import is_auth_path
 from secretgate.scan import BlockedError, TextScanner
 
 logger = structlog.get_logger()
 
 MAX_BUFFER_SIZE = 10 * 1024 * 1024  # 10MB
-
-# Paths that should never be scanned — auth/token endpoints contain
-# credentials (JWTs, refresh tokens) that would be redacted and break
-# authentication flows like OAuth token refresh.
-_AUTH_PATH_PATTERNS = re.compile(
-    r"(?:"
-    r"/oauth(?:/|$)"  # /oauth/ or /oauth at end
-    r"|/auth(?:/|$)"  # /auth/ or /auth at end
-    r"|/token(?:/|$|\?)"  # /token, /token/, /token?...
-    r"|/authorize(?:/|$|\?)"  # /authorize, /authorize/, /authorize?...
-    r"|/\.well-known/"  # /.well-known/openid-configuration etc.
-    r"|/login"  # /login endpoints
-    r")",
-    re.IGNORECASE,
-)
 
 
 def _print_block_notice(message: str, alerts: list[str], host: str) -> None:
@@ -195,7 +181,7 @@ class _ConnectionHandler:
     @staticmethod
     def _is_auth_path(path: str) -> bool:
         """Return True if the request path is an auth/token endpoint that should skip scanning."""
-        return bool(_AUTH_PATH_PATTERNS.search(path))
+        return is_auth_path(path)
 
     async def run(self) -> None:
         """Read the initial request and dispatch."""
