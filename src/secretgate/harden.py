@@ -18,7 +18,7 @@ def run_in_namespace(
     command: list[str],
     env: dict[str, str],
     proxy_port: int,
-) -> int:
+) -> int | None:
     """Run a command in a network namespace with only proxy access.
 
     Uses ``unshare --user --net`` + ``slirp4netns`` for rootless,
@@ -27,7 +27,8 @@ def run_in_namespace(
     outbound HTTPS is blocked by iptables rules *inside* the
     namespace.  No sudo required.
 
-    Returns the child process exit code.
+    Returns the child process exit code, or None if namespace
+    setup failed (e.g. nested namespaces on WSL2).
     """
     import subprocess
 
@@ -78,7 +79,8 @@ exec "$@"
         }
     )
 
-    # Start the child in a new user + network namespace
+    # Start the child in a new user + network namespace.
+    # Don't capture stderr — the user's command needs it.
     child = subprocess.Popen(
         [
             "unshare",
@@ -94,6 +96,25 @@ exec "$@"
         env=ns_env,
     )
 
+    # Brief pause to let unshare set up the namespace.
+    # If it fails immediately (e.g. nested namespace not supported),
+    # the child will exit and we detect it before starting slirp4netns.
+    import time
+
+    time.sleep(0.2)
+    if child.poll() is not None:
+        return None
+
+    # Verify the namespace exists before starting slirp4netns
+    import os
+
+    ns_path = f"/proc/{child.pid}/ns/net"
+    if not os.path.exists(ns_path):
+        # Process exists but namespace not ready — wait a bit more
+        time.sleep(0.5)
+        if child.poll() is not None or not os.path.exists(ns_path):
+            return None
+
     # Attach slirp4netns to give the namespace network access via a TAP device.
     # The host is reachable at 10.0.2.2 (default gateway).
     slirp = subprocess.Popen(
@@ -105,11 +126,18 @@ exec "$@"
             "tap0",
         ],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
     )
 
     try:
-        return child.wait()
+        rc = child.wait()
+        if rc != 0 and slirp.poll() is not None:
+            # slirp4netns exited early — namespace setup failed
+            stderr_out = slirp.stderr.read().decode(errors="replace").strip()
+            if "setns" in stderr_out or "Operation not permitted" in stderr_out:
+                # Can't create nested namespace (e.g. already in one)
+                return None
+        return rc
     except KeyboardInterrupt:
         child.terminate()
         try:

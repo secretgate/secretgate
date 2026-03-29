@@ -473,7 +473,14 @@ def wrap(
                 env=env,
                 proxy_port=forward_proxy_port,
             )
-            raise SystemExit(returncode)
+            if returncode is not None:
+                raise SystemExit(returncode)
+            # Namespace setup failed (e.g. nested namespace),
+            # fall back to running without isolation
+            click.echo(
+                "[secretgate] Namespace setup failed, continuing without network isolation.",
+                err=True,
+            )
         elif harden_method == "sandbox":
             from secretgate.harden import run_in_sandbox
 
@@ -484,9 +491,10 @@ def wrap(
                 proxy_port=forward_proxy_port,
             )
             raise SystemExit(returncode)
-        else:
-            result = subprocess.run(list(command), env=env)
-            raise SystemExit(result.returncode)
+
+        # No isolation or namespace fallback — run directly
+        result = subprocess.run(list(command), env=env)
+        raise SystemExit(result.returncode)
     except KeyboardInterrupt:
         pass
     finally:
