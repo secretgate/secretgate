@@ -5,7 +5,7 @@ from __future__ import annotations
 from click.testing import CliRunner
 
 from secretgate.cli import main
-from secretgate.harden import generate_remove, generate_rules, validate_domain
+from secretgate.harden import can_harden, generate_remove, generate_rules, validate_domain
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +98,49 @@ class TestGenerateRemove:
     def test_windows_remove(self):
         script = generate_remove(tool="windows")
         assert "delete rule" in script
+
+
+class TestCanHarden:
+    def test_returns_string_or_none(self):
+        result = can_harden()
+        assert result in ("namespace", "sandbox", None)
+
+    def test_linux_with_slirp4netns(self, monkeypatch):
+        monkeypatch.setattr("secretgate.harden.platform.system", lambda: "Linux")
+        monkeypatch.setattr("secretgate.harden.shutil.which", lambda x: "/usr/bin/" + x)
+        assert can_harden() == "namespace"
+
+    def test_linux_without_slirp4netns(self, monkeypatch):
+        monkeypatch.setattr("secretgate.harden.platform.system", lambda: "Linux")
+        monkeypatch.setattr("secretgate.harden.shutil.which", lambda x: None)
+        assert can_harden() is None
+
+    def test_darwin_with_sandbox_exec(self, monkeypatch):
+        monkeypatch.setattr("secretgate.harden.platform.system", lambda: "Darwin")
+        monkeypatch.setattr("secretgate.harden.shutil.which", lambda x: "/usr/bin/" + x)
+        assert can_harden() == "sandbox"
+
+    def test_darwin_without_sandbox_exec(self, monkeypatch):
+        monkeypatch.setattr("secretgate.harden.platform.system", lambda: "Darwin")
+        monkeypatch.setattr("secretgate.harden.shutil.which", lambda x: None)
+        assert can_harden() is None
+
+    def test_windows_returns_none(self, monkeypatch):
+        monkeypatch.setattr("secretgate.harden.platform.system", lambda: "Windows")
+        assert can_harden() is None
+
+
+class TestSandboxProfile:
+    def test_profile_generation(self):
+        """Verify the SBPL profile contains the right rules."""
+        from secretgate.harden import run_in_sandbox
+        import inspect
+
+        source = inspect.getsource(run_in_sandbox)
+        # The profile should deny network and allow localhost proxy
+        assert "deny network" in source
+        assert "allow network" in source
+        assert "localhost" in source
 
 
 class TestValidateDomain:

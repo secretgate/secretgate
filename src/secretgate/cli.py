@@ -274,20 +274,20 @@ def wrap(
         ctx.exit(1)
 
     # Auto-detect network isolation support
-    harden = False
+    from secretgate.harden import can_harden
+
+    harden_method = None
     if no_harden:
         pass  # explicitly disabled
-    elif sys.platform == "win32":
-        pass  # not supported on Windows
-    elif shutil.which("slirp4netns"):
-        harden = True
     else:
-        click.echo(
-            "Tip: install slirp4netns for network isolation "
-            "(prevents proxy bypass)\n"
-            "     sudo apt install slirp4netns",
-            err=True,
-        )
+        harden_method = can_harden()
+        if harden_method is None and sys.platform != "win32":
+            click.echo(
+                "Tip: install slirp4netns for network isolation "
+                "(prevents proxy bypass)\n"
+                "     sudo apt install slirp4netns",
+                err=True,
+            )
 
     # Resolve log file path
     if log_file is None:
@@ -448,11 +448,21 @@ def wrap(
     )
 
     try:
-        if harden:
+        if harden_method == "namespace":
             from secretgate.harden import run_in_namespace
 
-            click.echo("[secretgate] Running in isolated network namespace")
+            click.echo("[secretgate] Network isolation active (namespace)")
             returncode = run_in_namespace(
+                command=list(command),
+                env=env,
+                proxy_port=forward_proxy_port,
+            )
+            raise SystemExit(returncode)
+        elif harden_method == "sandbox":
+            from secretgate.harden import run_in_sandbox
+
+            click.echo("[secretgate] Network isolation active (sandbox)")
+            returncode = run_in_sandbox(
                 command=list(command),
                 env=env,
                 proxy_port=forward_proxy_port,

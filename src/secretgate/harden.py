@@ -125,6 +125,77 @@ exec "$@"
             slirp.kill()
 
 
+def run_in_sandbox(
+    command: list[str],
+    env: dict[str, str],
+    proxy_port: int,
+) -> int:
+    """Run a command in a macOS sandbox with only proxy access.
+
+    Uses ``sandbox-exec`` with an SBPL profile that denies all network
+    access except connections to localhost on the proxy port.
+    No root required.
+
+    Returns the child process exit code.
+    """
+    import subprocess
+    import tempfile
+
+    # Sandbox Profile Language (SBPL) — deny all network, allow only proxy
+    profile = f"""\
+(version 1)
+(deny default)
+
+;; Allow all non-network operations
+(allow process*)
+(allow file*)
+(allow sysctl-read)
+(allow mach*)
+(allow ipc*)
+(allow iokit-open)
+(allow system*)
+(allow signal)
+
+;; Network: only allow connections to the local proxy
+(deny network*)
+(allow network* (remote ip "localhost:{proxy_port}"))
+(allow network* (local ip "localhost:*"))
+"""
+
+    # Write profile to a temp file (sandbox-exec needs a file path)
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".sb", prefix="secretgate-", delete=False
+    ) as f:
+        f.write(profile)
+        profile_path = f.name
+
+    try:
+        result = subprocess.run(
+            ["sandbox-exec", "-f", profile_path, *command],
+            env=env,
+        )
+        return result.returncode
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        import os
+
+        os.unlink(profile_path)
+
+
+def can_harden() -> str | None:
+    """Check if per-process network isolation is available.
+
+    Returns the method name ("namespace", "sandbox") or None.
+    """
+    system = platform.system()
+    if system == "Linux" and shutil.which("slirp4netns"):
+        return "namespace"
+    elif system == "Darwin" and shutil.which("sandbox-exec"):
+        return "sandbox"
+    return None
+
+
 def validate_domain(domain: str) -> bool:
     """Check that a domain looks safe to embed in a shell script."""
     return bool(re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$", domain))
