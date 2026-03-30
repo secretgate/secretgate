@@ -408,6 +408,22 @@ class _ConnectionHandler:
                 await self._send_error(client_writer, 400, "Bad Request", "Malformed HTTP request")
                 return
 
+            # Detect WebSocket upgrade — forward headers then switch to raw pipe
+            if (
+                req_headers.get("upgrade", "").lower() == "websocket"
+                and "upgrade" in req_headers.get("connection", "").lower()
+            ):
+                logger.info("websocket_upgrade_detected", host=host)
+                upstream_writer.write(req_header_data)
+                await upstream_writer.drain()
+                # Relay the 101 response + all subsequent frames as raw bytes
+                await asyncio.gather(
+                    self._pipe(upstream_reader, client_writer),
+                    self._pipe(client_reader, upstream_writer),
+                    return_exceptions=True,
+                )
+                return
+
             # Read the request body
             content_length_str = req_headers.get("content-length")
             req_transfer = req_headers.get("transfer-encoding", "").lower()

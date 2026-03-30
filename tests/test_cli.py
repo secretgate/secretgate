@@ -126,3 +126,80 @@ class TestServeCommand:
         assert "--mode" in result.output
         assert "--forward-proxy-port" in result.output
         assert "redact" in result.output
+
+
+class TestScanDirectoryWalk:
+    def test_scan_directory(self, tmp_path):
+        """Scan a directory recursively."""
+        sub = tmp_path / "subdir"
+        sub.mkdir()
+        (sub / "clean.py").write_text("x = 1\n")
+        (sub / "dirty.env").write_text("AWS_KEY=AKIAIOSFODNN7EXAMPLE\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["scan", str(tmp_path)])
+        assert result.exit_code == 1
+        assert "secret(s) found" in result.output
+
+    def test_scan_directory_skips_binary(self, tmp_path):
+        """Binary extensions like .png should be skipped without error."""
+        (tmp_path / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+        (tmp_path / "clean.txt").write_text("Hello\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["scan", str(tmp_path)])
+        assert result.exit_code == 0
+        assert "No secrets found" in result.output
+
+    def test_scan_directory_skips_git(self, tmp_path):
+        """The .git directory should be skipped."""
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "config").write_text("AWS_KEY=AKIAIOSFODNN7EXAMPLE\n")
+        (tmp_path / "clean.txt").write_text("Hello\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["scan", str(tmp_path)])
+        assert result.exit_code == 0
+
+    def test_scan_empty_directory(self, tmp_path):
+        """Empty directory should report zero files."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["scan", str(tmp_path)])
+        assert result.exit_code == 0
+        assert "No secrets found" in result.output
+
+
+class TestScanJsonOutput:
+    def test_json_output_clean(self):
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["scan", "--json-output"], input="just normal text\n"
+        )
+        assert result.exit_code == 0
+        import json
+        data = json.loads(result.output)
+        assert data["secrets_found"] == 0
+        assert data["files_scanned"] == 1
+
+    def test_json_output_with_secrets(self):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["scan", "--json-output"],
+            input="AWS_KEY=AKIAIOSFODNN7EXAMPLE\n",
+        )
+        assert result.exit_code == 1
+        import json
+        data = json.loads(result.output)
+        assert data["secrets_found"] >= 1
+        assert len(data["results"]) >= 1
+        assert "service" in data["results"][0]
+        assert "pattern" in data["results"][0]
+
+    def test_json_output_file(self, tmp_path):
+        secret_file = tmp_path / "test.env"
+        secret_file.write_text("GITHUB_TOKEN=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef12\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["scan", "--json-output", str(secret_file)])
+        assert result.exit_code == 1
+        import json
+        data = json.loads(result.output)
+        assert data["secrets_found"] >= 1
