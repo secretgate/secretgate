@@ -169,13 +169,35 @@ secretgate wrap --harden -- claude      # force-enable on any platform
 secretgate wrap --no-harden -- claude   # force-disable
 ```
 
-You can also generate standalone firewall rules (without the namespace approach):
+You can also generate standalone firewall rules (without the namespace approach).
+These block direct HTTPS (port 443) for the current user, forcing all traffic
+through the proxy:
 
 ```bash
-secretgate harden                        # auto-detect platform
-secretgate harden --tool iptables        # specific tool
+secretgate harden                        # auto-detect platform, print rules
+secretgate harden --tool iptables        # specific firewall tool
+secretgate harden --tool nftables        # nftables (native Linux, not WSL2)
+secretgate harden --domains api.anthropic.com api.openai.com  # block specific domains only
 secretgate harden --remove               # generate removal commands
 ```
+
+**Firewall platform support:**
+
+| Platform | Tool | Status |
+|----------|------|--------|
+| Linux (native) | iptables | Generates rules, **needs testing** |
+| Linux (native) | nftables | Generates rules, **needs testing** |
+| macOS | pf (packet filter) | Generates rules, **needs testing** |
+| Windows | Windows Firewall (netsh) | Generates rules, **needs testing** |
+| Linux (WSL2) | iptables (auto-detected) | Tested |
+
+The `harden` command prints the rules to stdout — review them before applying with
+`sudo`. The generated rules only affect the current user and are safe to remove with
+`secretgate harden --remove`.
+
+> **We need testers!** If you try `secretgate harden` or `secretgate wrap --harden`
+> on native Linux, macOS, or Windows, please report your results at
+> [github.com/secretgate/secretgate/issues](https://github.com/secretgate/secretgate/issues).
 
 See [docs/hardening.md](docs/hardening.md) for the full hardening guide.
 
