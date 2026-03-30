@@ -9,40 +9,34 @@ simplest.
 
 ## 1. Firewall Rules (Strongest — Network-Level)
 
-Block direct outbound HTTPS connections, forcing all traffic through the proxy:
-
-### Linux (iptables)
-
-```bash
-# Allow traffic to the local proxy
-iptables -A OUTPUT -o lo -j ACCEPT
-
-# Block direct connections to LLM API endpoints on port 443
-iptables -A OUTPUT -p tcp --dport 443 -m owner --uid-owner $(id -u) -j DROP
-```
-
-To be more targeted, block only specific LLM API IPs:
+Block direct outbound HTTPS connections, forcing all traffic through the proxy.
+The `secretgate harden` command generates platform-specific rules automatically:
 
 ```bash
-# Resolve and block specific domains
-for domain in api.anthropic.com api.openai.com api.mistral.ai; do
-    for ip in $(dig +short "$domain"); do
-        iptables -A OUTPUT -p tcp --dport 443 -d "$ip" -j DROP
-    done
-done
+# Auto-detect platform and print rules
+secretgate harden
+
+# Specify the tool explicitly
+secretgate harden --tool iptables
+secretgate harden --tool nftables
+secretgate harden --tool pf
+secretgate harden --tool windows
+
+# Only block specific domains
+secretgate harden -d api.anthropic.com -d api.openai.com
+
+# Restrict to a specific user
+secretgate harden -u developer
+
+# Write to a file
+secretgate harden -o firewall.sh
+
+# Generate removal commands
+secretgate harden --remove
 ```
 
-### macOS (pf)
-
-```bash
-# /etc/pf.anchors/secretgate
-block out proto tcp from any to any port 443 user $(whoami)
-pass out proto tcp from any to 127.0.0.1 port 8083
-
-# Load:
-sudo pfctl -a secretgate -f /etc/pf.anchors/secretgate
-sudo pfctl -e
-```
+Review the generated rules, then apply with appropriate privileges
+(e.g., `sudo bash firewall.sh` on Linux).
 
 The AI tool cannot bypass this — it doesn't have root access to modify
 firewall rules.
@@ -122,15 +116,17 @@ If using Claude Code, add a pre-tool hook to detect proxy variable manipulation:
 
 ## Recommended Approach
 
-Layer **firewall rules + readonly env vars + hooks** for defense-in-depth:
+**Firewall rules** (`secretgate harden`) are the primary enforcement — they
+block direct HTTPS at the kernel level, which the AI tool cannot bypass
+without root. Secretgate itself provides all the observability you need:
+scanning, redaction, blocking, and audit logging of every request.
 
-1. **Firewall** — hard enforcement the tool cannot bypass
-2. **Readonly vars** — catches accidental/naive override attempts
-3. **Hooks** — creates an audit trail and catches the easy cases
-
-No single layer is perfect, but combined they make bypass extremely difficult.
+The other layers (readonly vars, hooks, containers) are optional
+defense-in-depth. They can help with user feedback and audit trails but
+are not required when firewall rules are active.
 
 ## Related
 
 - [GitHub Issue #33](https://github.com/secretgate/secretgate/issues/33) — Tracking issue for hardening
 - `secretgate wrap` — Already sets proxy env vars automatically
+- `secretgate harden` — Generate firewall rules for your platform

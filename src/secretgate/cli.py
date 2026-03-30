@@ -226,22 +226,41 @@ def _find_available_port(preferred: int, max_attempts: int = 20) -> int:
     help="Log file path (default: ~/.secretgate/wrap.log, use '-' to disable)",
 )
 @click.option("--verbose", "-v", is_flag=True, help="Also stream proxy logs to stderr")
+@click.option(
+    "--harden", is_flag=True, help="Enable network isolation (auto-enabled on tested platforms)"
+)
+@click.option("--no-harden", is_flag=True, help="Disable network isolation even if available")
 @click.pass_context
-def wrap(ctx, forward_proxy_port: int, port: int, mode: str, log_file: Path | None, verbose: bool):
+def wrap(
+    ctx,
+    forward_proxy_port: int,
+    port: int,
+    mode: str,
+    log_file: Path | None,
+    verbose: bool,
+    harden: bool,
+    no_harden: bool,
+):
     """Run a command with all traffic routed through secretgate.
 
     Starts the forward proxy in the background, sets proxy env vars,
     and runs the given command. Stops the proxy when the command exits.
 
+    Network isolation (--harden) runs the command in a restricted
+    environment where only the proxy is reachable. Auto-enabled on
+    tested platforms (WSL2). Use --harden to enable on other platforms,
+    --no-harden to disable everywhere.
+
     \b
     Examples:
         secretgate wrap -- claude
-        secretgate wrap -- curl https://example.com
+        secretgate wrap --harden -- claude
+        secretgate wrap --no-harden -- claude
         secretgate wrap --mode audit -- bash
-        secretgate wrap -- git push
     """
     import atexit
     import os
+    import shutil
     import socket
     import subprocess
     import sys
@@ -258,6 +277,33 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str, log_file: Path | No
         click.echo("Usage: secretgate wrap -- <command> [args...]", err=True)
         click.echo("Example: secretgate wrap -- claude", err=True)
         ctx.exit(1)
+
+    # Auto-detect network isolation support
+    from secretgate.harden import can_harden
+
+    harden_method = None
+    if no_harden:
+        pass  # explicitly disabled
+    else:
+        method, tested = can_harden()
+        if method and (harden or tested):
+            # Auto-enable on tested platforms, or when explicitly requested
+            harden_method = method
+        elif method and not tested:
+            click.echo(
+                f"Network isolation available ({method}) but not yet verified "
+                f"on this platform.\n"
+                f"  Use --harden to enable it and please report results at:\n"
+                f"  https://github.com/secretgate/secretgate/issues",
+                err=True,
+            )
+        elif method is None and sys.platform != "win32":
+            click.echo(
+                "Tip: install slirp4netns for network isolation "
+                "(prevents proxy bypass)\n"
+                "     sudo apt install slirp4netns",
+                err=True,
+            )
 
     # Resolve log file path
     if log_file is None:
@@ -298,8 +344,6 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str, log_file: Path | No
     if sys.platform == "win32":
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
 
-    import shutil
-
     # Find the secretgate binary — prefer the same entry point that invoked us
     secretgate_bin = shutil.which("secretgate") or sys.executable
     server_cmd = (
@@ -307,6 +351,7 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str, log_file: Path | No
         if secretgate_bin != sys.executable
         else [sys.executable, "-m", "secretgate", "serve"]
     )
+
     # Set up log file for server output
     log_fh = None
     if log_path is not None:
@@ -419,6 +464,35 @@ def wrap(ctx, forward_proxy_port: int, port: int, mode: str, log_file: Path | No
     )
 
     try:
+        if harden_method == "namespace":
+            from secretgate.harden import run_in_namespace
+
+            click.echo("[secretgate] Network isolation active (namespace)")
+            returncode = run_in_namespace(
+                command=list(command),
+                env=env,
+                proxy_port=forward_proxy_port,
+            )
+            if returncode is not None:
+                raise SystemExit(returncode)
+            # Namespace setup failed (e.g. nested namespace),
+            # fall back to running without isolation
+            click.echo(
+                "[secretgate] Namespace setup failed, continuing without network isolation.",
+                err=True,
+            )
+        elif harden_method == "sandbox":
+            from secretgate.harden import run_in_sandbox
+
+            click.echo("[secretgate] Network isolation active (sandbox)")
+            returncode = run_in_sandbox(
+                command=list(command),
+                env=env,
+                proxy_port=forward_proxy_port,
+            )
+            raise SystemExit(returncode)
+
+        # No isolation or namespace fallback — run directly
         result = subprocess.run(list(command), env=env)
         raise SystemExit(result.returncode)
     except KeyboardInterrupt:
@@ -517,6 +591,84 @@ def ca_trust():
         click.echo(f"  export NODE_EXTRA_CA_CERTS={cert_path}")
         click.echo()
         click.echo("Or install the CA system-wide (no env vars needed):")
+
+
+@main.command()
+@click.option(
+    "--forward-proxy-port",
+    "-f",
+    default=8083,
+    type=int,
+    help="Proxy port to allow in generated rules",
+)
+@click.option(
+    "--tool",
+    type=click.Choice(["iptables", "nftables", "pf", "windows", "auto"]),
+    default="auto",
+    help="Firewall tool (default: auto-detect)",
+)
+@click.option(
+    "--domain",
+    "-d",
+    multiple=True,
+    help="Only block specific domains (can be repeated; default: block all port 443)",
+)
+@click.option("--user", "-u", default=None, help="Restrict rules to this OS user")
+@click.option("--remove", is_flag=True, help="Generate removal commands instead")
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write script to file instead of stdout",
+)
+def harden(
+    forward_proxy_port: int,
+    tool: str,
+    domain: tuple[str, ...],
+    user: str | None,
+    remove: bool,
+    output: Path | None,
+):
+    """Generate firewall rules to prevent AI tools from bypassing the proxy.
+
+    Produces platform-specific rules that block direct outbound HTTPS,
+    forcing all traffic through secretgate. The proxy provides scanning,
+    redaction, and audit logging.
+
+    \b
+    Examples:
+        secretgate harden                            # auto-detect platform
+        secretgate harden --tool iptables            # specific tool
+        secretgate harden -d api.anthropic.com       # block specific domains
+        secretgate harden --remove                   # generate removal commands
+        secretgate harden -o firewall.sh             # write to file
+    """
+    from secretgate.harden import generate_remove, generate_rules
+
+    resolved_tool = None if tool == "auto" else tool
+    domains = list(domain) if domain else None
+
+    try:
+        if remove:
+            script = generate_remove(tool=resolved_tool)
+        else:
+            script = generate_rules(
+                proxy_port=forward_proxy_port,
+                tool=resolved_tool,
+                domains=domains,
+                user=user,
+            )
+    except ValueError as e:
+        raise click.ClickException(str(e))
+
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(script)
+        output.chmod(0o755)
+        click.echo(f"Script written to {output}")
+    else:
+        click.echo(script, nl=False)
 
 
 if __name__ == "__main__":

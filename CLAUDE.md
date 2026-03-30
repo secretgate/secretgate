@@ -20,6 +20,7 @@ Lean security proxy for AI coding tools — scans and redacts secrets before the
   - `secrets/known_values.py` — known-value scanning: harvest env vars/files at startup, Aho-Corasick or naive matching
   - `secrets/detect_secrets_adapter.py` — optional Yelp detect-secrets integration (regex plugins only)
   - `signatures.yaml` — ~170 regex patterns (AWS, GCP, GitHub, GitLab, Slack, OpenAI, Anthropic, Stripe, etc.)
+  - `harden.py` — network isolation and firewall hardening (issue #33): `run_in_namespace()` for Linux (unshare + slirp4netns), `run_in_sandbox()` for macOS (sandbox-exec SBPL), `can_harden()` for platform detection, plus firewall rule generation (iptables/nftables/pf/windows)
 - `scripts/` — helper scripts
   - `setup.sh` — one-time setup (install CA, trust instructions, shell config)
   - `with-secretgate.sh` — standalone wrapper (starts proxy, runs command, stops proxy)
@@ -75,6 +76,7 @@ The forward proxy (`--forward-proxy-port 8083`) intercepts all HTTPS traffic via
 - `passthrough_domains` config skips MITM for specified domains
 - Supports chunked transfer encoding and streaming responses (SSE)
 - `secretgate wrap -- <command>` starts proxy, sets env vars, runs command, stops proxy on exit
+- **Network isolation**: `wrap` auto-enables network namespace isolation on WSL2 when `slirp4netns` is installed; uses `sandbox-exec` on macOS with `--harden`. The child process can only reach the proxy — direct HTTPS is blocked at the kernel level. No sudo required.
 - **Git packfile scanning**: `git push` sends data as binary packfiles (zlib-compressed objects); secretgate parses these, extracts text from commit/blob/tag objects, and scans for secrets. Redact mode falls back to block (can't safely rewrite packfile binaries). Delta objects are skipped. Safety limits: 1MB per object, 10MB total decompressed.
 
 ### Tested with
