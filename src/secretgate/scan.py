@@ -66,7 +66,9 @@ class TextScanner:
         # Also detect by PACK magic in the body (could be generic octet-stream)
         return PACK_MAGIC in body[:8192]  # only check first 8KB for the magic
 
-    def scan_packfile(self, body: bytes) -> tuple[bytes, list[str]]:
+    def scan_packfile(
+        self, body: bytes, *, mode_override: str | None = None
+    ) -> tuple[bytes, list[str]]:
         """Scan a git packfile for secrets.
 
         Extracts text from commit, blob, and tag objects and scans each.
@@ -74,6 +76,7 @@ class TextScanner:
         In block/redact mode: raises BlockedError (packfiles cannot be safely
         rewritten without corrupting checksums and delta chains).
         """
+        mode = mode_override or self._mode
         alerts: list[str] = []
         texts = extract_texts_from_packfile(body)
 
@@ -98,7 +101,7 @@ class TextScanner:
                 line=m.line_number,
             )
 
-        if self._mode == "audit":
+        if mode == "audit":
             return body, alerts
 
         # Block and redact modes both block — we cannot safely rewrite
@@ -110,13 +113,23 @@ class TextScanner:
             alerts,
         )
 
-    def scan_body(self, body: bytes, content_type: str = "text/plain") -> tuple[bytes, list[str]]:
+    def scan_body(
+        self,
+        body: bytes,
+        content_type: str = "text/plain",
+        *,
+        mode_override: str | None = None,
+    ) -> tuple[bytes, list[str]]:
         """Scan body bytes for secrets. Returns (possibly modified body, alerts).
 
         In block mode, raises BlockedError if secrets are found.
         In audit mode, returns body unchanged but with alerts.
         In redact mode, replaces secrets with [REDACTED] markers.
+
+        ``mode_override`` overrides the scanner's global mode for this call only.
+        Valid values: ``"redact"``, ``"audit"``, ``"block"``.
         """
+        mode = mode_override or self._mode
         alerts: list[str] = []
 
         if not body or not self.should_scan(content_type):
@@ -124,7 +137,7 @@ class TextScanner:
 
         # Route git packfiles to the packfile scanner
         if self._is_git_packfile(body, content_type):
-            return self.scan_packfile(body)
+            return self.scan_packfile(body, mode_override=mode_override)
 
         try:
             text = body.decode("utf-8", errors="replace")
@@ -151,10 +164,10 @@ class TextScanner:
                 line=m.line_number,
             )
 
-        if self._mode == "block":
+        if mode == "block":
             raise BlockedError(f"Request blocked: {len(matches)} secret(s) detected", alerts)
 
-        if self._mode == "audit":
+        if mode == "audit":
             return body, alerts
 
         # Redact mode: replace secrets with deterministic placeholders

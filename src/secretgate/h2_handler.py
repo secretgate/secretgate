@@ -60,6 +60,7 @@ class _StreamState:
     request_complete: bool = False
     upstream_stream_id: int | None = None
     skip_scan: bool = False
+    scan_mode_override: str | None = None
 
 
 class H2ConnectionHandler:
@@ -335,18 +336,35 @@ class H2ConnectionHandler:
             decoded.append((n, v))
 
         path = ""
+        scan_mode_override = None
+        skip_scan_header = False
+        filtered = []
         for n, v in decoded:
             if n == ":path":
                 path = v
-                break
+            if n == "x-secretgate-mode":
+                if v in ("redact", "audit", "block"):
+                    scan_mode_override = v
+                continue  # strip from forwarded headers
+            if n == "x-secretgate-skip":
+                if v.lower() in ("1", "true"):
+                    skip_scan_header = True
+                continue  # strip from forwarded headers
+            filtered.append((n, v))
 
-        skip_scan = bool(_AUTH_PATH_PATTERNS.search(path))
-        if skip_scan:
+        if scan_mode_override:
+            logger.debug("h2_scan_mode_override", host=self._host, mode=scan_mode_override)
+        if skip_scan_header:
+            logger.debug("h2_scan_skip_header", host=self._host)
+
+        skip_scan = bool(_AUTH_PATH_PATTERNS.search(path)) or skip_scan_header
+        if _AUTH_PATH_PATTERNS.search(path):
             logger.debug("h2_skip_auth_path", host=self._host, path=path)
 
         self._streams[stream_id] = _StreamState(
-            request_headers=decoded,
+            request_headers=filtered,
             skip_scan=skip_scan,
+            scan_mode_override=scan_mode_override,
         )
 
     async def _on_request_data(
@@ -386,7 +404,9 @@ class H2ConnectionHandler:
         scanned_body = body
         if body and not state.skip_scan:
             try:
-                scanned_body, alerts = self._scanner.scan_body(body, content_type)
+                scanned_body, alerts = self._scanner.scan_body(
+                    body, content_type, mode_override=state.scan_mode_override
+                )
                 for alert in alerts:
                     logger.warning("h2_forward_proxy_alert", host=self._host, alert=alert)
             except BlockedError as exc:
