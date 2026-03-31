@@ -7,7 +7,6 @@ the client and upstream sides, scanning request bodies through TextScanner.
 from __future__ import annotations
 
 import asyncio
-import re
 import ssl
 import sys
 from dataclasses import dataclass, field
@@ -17,25 +16,13 @@ import h2.connection
 import h2.events
 import structlog
 
+from secretgate.patterns import is_auth_path
 from secretgate.scan import BlockedError, TextScanner
 
 logger = structlog.get_logger()
 
 # Match forward.py's limit
 MAX_BODY_SIZE = 10 * 1024 * 1024  # 10MB
-
-# Auth path pattern — same as forward.py (duplicated to avoid circular import)
-_AUTH_PATH_PATTERNS = re.compile(
-    r"(?:"
-    r"/oauth(?:/|$)"
-    r"|/auth(?:/|$)"
-    r"|/token(?:/|$|\?)"
-    r"|/authorize(?:/|$|\?)"
-    r"|/\.well-known/"
-    r"|/login"
-    r")",
-    re.IGNORECASE,
-)
 
 
 def _print_block_notice(message: str, alerts: list[str], host: str) -> None:
@@ -340,7 +327,7 @@ class H2ConnectionHandler:
                 path = v
                 break
 
-        skip_scan = bool(_AUTH_PATH_PATTERNS.search(path))
+        skip_scan = is_auth_path(path)
         if skip_scan:
             logger.debug("h2_skip_auth_path", host=self._host, path=path)
 
