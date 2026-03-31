@@ -116,6 +116,25 @@ def serve(
     uvicorn.run(app, host=cfg.host, port=cfg.port, log_level=log_level)
 
 
+def _resolve_paths(paths: list[str]) -> list[str]:
+    """Expand directories into individual file paths for scanning."""
+    import os
+
+    result: list[str] = []
+    for p in paths:
+        if os.path.isdir(p):
+            for root, _dirs, filenames in os.walk(p):
+                # Skip hidden directories (e.g. .git, .venv)
+                _dirs[:] = [d for d in _dirs if not d.startswith(".")]
+                for fname in sorted(filenames):
+                    if fname.startswith("."):
+                        continue
+                    result.append(os.path.join(root, fname))
+        else:
+            result.append(p)
+    return result
+
+
 @main.command()
 @click.option(
     "--detect-secrets",
@@ -157,9 +176,13 @@ def scan(use_detect_secrets: bool, no_entropy: bool, no_known_values: bool, file
     total_matches = []
 
     if files:
-        for filepath in files:
-            with open(filepath) as f:
-                text = f.read()
+        resolved_files = _resolve_paths(list(files))
+        for filepath in resolved_files:
+            try:
+                with open(filepath) as f:
+                    text = f.read()
+            except (OSError, UnicodeDecodeError):
+                continue  # skip binary/unreadable files
             matches = scanner.scan(text)
             for m in matches:
                 preview = m.value[:8] + "..." if len(m.value) > 8 else m.value

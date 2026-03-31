@@ -126,3 +126,41 @@ class TestServeCommand:
         assert "--mode" in result.output
         assert "--forward-proxy-port" in result.output
         assert "redact" in result.output
+
+
+class TestScanDirectory:
+    def test_scan_directory_with_secrets(self, tmp_path):
+        """scan should recurse into directories."""
+        sub = tmp_path / "subdir"
+        sub.mkdir()
+        (sub / "secrets.txt").write_text("MY_KEY=AKIAIOSFODNN7EXAMPLE\n")
+        (sub / "clean.txt").write_text("nothing here\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["scan", str(tmp_path)])
+        assert result.exit_code == 1
+        assert "secret(s) found" in result.output
+        assert "subdir" in result.output
+
+    def test_scan_directory_clean(self, tmp_path):
+        (tmp_path / "clean.txt").write_text("Hello world\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["scan", str(tmp_path)])
+        assert result.exit_code == 0
+        assert "No secrets found" in result.output
+
+    def test_scan_skips_hidden_dirs(self, tmp_path):
+        hidden = tmp_path / ".hidden"
+        hidden.mkdir()
+        (hidden / "secret.txt").write_text("MY_KEY=AKIAIOSFODNN7EXAMPLE\n")
+        (tmp_path / "clean.txt").write_text("nothing\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["scan", str(tmp_path)])
+        assert result.exit_code == 0
+        assert "No secrets found" in result.output
+
+    def test_scan_skips_binary_files(self, tmp_path):
+        (tmp_path / "binary.dat").write_bytes(b"\x00\x01\x02\xff\xfe")
+        (tmp_path / "clean.txt").write_text("nothing\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["scan", str(tmp_path)])
+        assert result.exit_code == 0

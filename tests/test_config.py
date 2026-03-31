@@ -182,3 +182,28 @@ class TestProviderConfig:
     def test_custom_auth_header(self):
         p = ProviderConfig(name="test", base_url="https://test.com", auth_header="X-Key")
         assert p.auth_header == "X-Key"
+
+
+class TestConfigEnvOverridesExtended:
+    def test_log_format_override(self, monkeypatch):
+        monkeypatch.setenv("SECRETGATE_LOG_FORMAT", "json")
+        cfg = Config.load(None)
+        assert cfg.log_format == "json"
+
+    def test_audit_log_override(self, monkeypatch):
+        monkeypatch.setenv("SECRETGATE_AUDIT_LOG", "/tmp/audit.log")
+        cfg = Config.load(None)
+        assert cfg.audit_log == Path("/tmp/audit.log")
+
+
+class TestVersionConsistency:
+    def test_init_matches_pyproject(self):
+        """__init__.__version__ should match pyproject.toml version."""
+        import tomllib
+
+        from secretgate import __version__
+
+        pyproject = Path(__file__).parent.parent / "pyproject.toml"
+        with open(pyproject, "rb") as f:
+            data = tomllib.load(f)
+        assert __version__ == data["project"]["version"]
