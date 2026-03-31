@@ -136,6 +136,10 @@ class Config:
             cfg.forward_proxy_port = int(fpp)
         if certs := os.environ.get("SECRETGATE_CERTS_DIR"):
             cfg.certs_dir = Path(certs)
+        if log_fmt := os.environ.get("SECRETGATE_LOG_FORMAT"):
+            cfg.log_format = log_fmt
+        if audit := os.environ.get("SECRETGATE_AUDIT_LOG"):
+            cfg.audit_log = Path(audit)
 
         # Set up default providers if none configured
         if not cfg.providers:
