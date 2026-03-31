@@ -133,11 +133,30 @@ def serve(
     is_flag=True,
     help="Disable known-value secret scanning (env var / file harvesting)",
 )
+@click.option(
+    "--json-output",
+    "json_output",
+    is_flag=True,
+    help="Output results as JSON (useful for CI/CD pipelines)",
+)
+@click.option(
+    "--staged",
+    is_flag=True,
+    help="Scan only git staged changes (for pre-commit hooks)",
+)
 @click.argument("files", nargs=-1, type=click.Path(exists=True))
-def scan(use_detect_secrets: bool, no_entropy: bool, no_known_values: bool, files: tuple[str, ...]):
+def scan(
+    use_detect_secrets: bool,
+    no_entropy: bool,
+    no_known_values: bool,
+    json_output: bool,
+    staged: bool,
+    files: tuple[str, ...],
+):
     """Scan files or stdin for secrets.
 
     Pass file paths as arguments, or pipe text via stdin.
+    Directories are walked recursively (binary and hidden files are skipped).
 
     \b
     Examples:
@@ -147,6 +166,7 @@ def scan(use_detect_secrets: bool, no_entropy: bool, no_known_values: bool, file
         git diff --cached | secretgate scan
     """
     import sys
+
     from secretgate.secrets.scanner import SecretScanner
 
     scanner = SecretScanner(
@@ -155,32 +175,148 @@ def scan(use_detect_secrets: bool, no_entropy: bool, no_known_values: bool, file
         enable_known_values=not no_known_values,
     )
     total_matches = []
+    files_scanned = 0
 
-    if files:
-        for filepath in files:
-            with open(filepath) as f:
-                text = f.read()
-            matches = scanner.scan(text)
-            for m in matches:
-                preview = m.value[:8] + "..." if len(m.value) > 8 else m.value
-                click.echo(
-                    f"  {filepath}:{m.line_number}: [{m.service}] {m.pattern_name} — {preview}"
+    if staged:
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--cached", "--diff-filter=ACMR", "--name-only"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            staged_files = [f.strip() for f in result.stdout.splitlines() if f.strip()]
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            click.echo("Error: not a git repository or git not available", err=True)
+            sys.exit(2)
+
+        for filepath in staged_files:
+            try:
+                # Read the staged version (not the working copy)
+                staged_content = subprocess.run(
+                    ["git", "show", f":{filepath}"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
                 )
+                text = staged_content.stdout
+            except (subprocess.CalledProcessError, UnicodeDecodeError):
+                continue
+            files_scanned += 1
+            matches = scanner.scan(text)
+            if not json_output:
+                for m in matches:
+                    preview = m.value[:8] + "..." if len(m.value) > 8 else m.value
+                    click.echo(
+                        f"  {filepath}:{m.line_number}: [{m.service}] {m.pattern_name} — {preview}"
+                    )
+            total_matches.extend(matches)
+    elif files:
+        resolved_files = _resolve_file_args(files)
+        for filepath in resolved_files:
+            try:
+                with open(filepath) as f:
+                    text = f.read()
+            except (UnicodeDecodeError, OSError):
+                continue  # skip binary or unreadable files
+            files_scanned += 1
+            matches = scanner.scan(text)
+            if not json_output:
+                for m in matches:
+                    preview = m.value[:8] + "..." if len(m.value) > 8 else m.value
+                    click.echo(
+                        f"  {filepath}:{m.line_number}: [{m.service}] {m.pattern_name} — {preview}"
+                    )
             total_matches.extend(matches)
     else:
         text = sys.stdin.read()
+        files_scanned = 1
         matches = scanner.scan(text)
-        for m in matches:
-            preview = m.value[:8] + "..." if len(m.value) > 8 else m.value
-            click.echo(f"  Line {m.line_number}: [{m.service}] {m.pattern_name} — {preview}")
+        if not json_output:
+            for m in matches:
+                preview = m.value[:8] + "..." if len(m.value) > 8 else m.value
+                click.echo(f"  Line {m.line_number}: [{m.service}] {m.pattern_name} — {preview}")
         total_matches.extend(matches)
 
-    if not total_matches:
-        click.echo("No secrets found.")
+    if json_output:
+        import json
+
+        results = []
+        for m in total_matches:
+            results.append({
+                "service": m.service,
+                "pattern": m.pattern_name,
+                "line": m.line_number,
+                "preview": m.value[:8] + "..." if len(m.value) > 8 else m.value,
+            })
+        click.echo(json.dumps({
+            "secrets_found": len(total_matches),
+            "files_scanned": files_scanned,
+            "results": results,
+        }, indent=2))
+        if total_matches:
+            sys.exit(1)
         return
 
-    click.echo(f"\n{len(total_matches)} secret(s) found.")
+    if not total_matches:
+        summary = f"No secrets found ({files_scanned} file(s) scanned)."
+        click.echo(summary)
+        return
+
+    click.echo(f"\n{len(total_matches)} secret(s) found in {files_scanned} file(s).")
     sys.exit(1)
+
+
+# File extensions to skip when walking directories (binary/irrelevant files)
+_SKIP_EXTENSIONS = frozenset({
+    ".pyc", ".pyo", ".so", ".dylib", ".dll", ".exe",
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".webp", ".svg",
+    ".woff", ".woff2", ".ttf", ".eot",
+    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx",
+    ".db", ".sqlite", ".sqlite3",
+    ".lock",
+})
+
+# Directory names to skip when walking
+_SKIP_DIRS = frozenset({
+    ".git", ".hg", ".svn", "__pycache__", "node_modules",
+    ".venv", "venv", ".tox", ".eggs", ".mypy_cache",
+    ".ruff_cache", ".pytest_cache", "dist", "build",
+    ".next", ".nuxt",
+})
+
+
+def _resolve_file_args(paths: tuple[str, ...]) -> list[str]:
+    """Expand directories into individual file paths, skip binary/hidden files."""
+    from pathlib import Path as _Path
+
+    result: list[str] = []
+    for p in paths:
+        path = _Path(p)
+        if path.is_file():
+            result.append(str(path))
+        elif path.is_dir():
+            for child in sorted(path.rglob("*")):
+                if not child.is_file():
+                    continue
+                # Skip hidden files
+                if any(part.startswith(".") and part not in (".env",) for part in child.parts):
+                    if child.parts != path.parts:  # don't skip the root arg itself
+                        # Only skip if a hidden *directory* is in the path
+                        rel = child.relative_to(path)
+                        if any(part.startswith(".") and part not in (".env",) for part in rel.parts[:-1]):
+                            continue
+                # Skip binary extensions
+                if child.suffix.lower() in _SKIP_EXTENSIONS:
+                    continue
+                # Skip known dirs (already handled by rglob but double-check)
+                if any(part in _SKIP_DIRS for part in child.parts):
+                    continue
+                result.append(str(child))
+    return result
 
 
 def _find_available_port(preferred: int, max_attempts: int = 20) -> int:
