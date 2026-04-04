@@ -408,6 +408,53 @@ class _ConnectionHandler:
                 await self._send_error(client_writer, 400, "Bad Request", "Malformed HTTP request")
                 return
 
+            # Detect WebSocket upgrade — pass through as raw bidirectional pipe
+            # (WebSocket frame content is not scanned — documented limitation)
+            if (
+                req_headers.get("upgrade", "").lower() == "websocket"
+                and "upgrade" in req_headers.get("connection", "").lower()
+            ):
+                logger.warning(
+                    "websocket_upgrade_detected",
+                    host=host,
+                    note="frames bypass secret scanning",
+                )
+                # Forward only the headers (not any trailing bytes) to upstream
+                upstream_writer.write(headers_bytes + body_start)
+                await upstream_writer.drain()
+
+                # Read upstream response and validate 101 before piping
+                resp_data = b""
+                while b"\r\n\r\n" not in resp_data:
+                    chunk = await upstream_reader.read(8192)
+                    if not chunk:
+                        await self._send_error(
+                            client_writer,
+                            502,
+                            "Bad Gateway",
+                            "Upstream closed before completing WebSocket handshake",
+                        )
+                        return
+                    resp_data += chunk
+
+                # Check for 101 Switching Protocols
+                resp_line = resp_data.split(b"\r\n", 1)[0].decode("latin-1", errors="replace")
+                if "101" not in resp_line:
+                    # Not a WebSocket upgrade — forward the error response to client
+                    client_writer.write(resp_data)
+                    await client_writer.drain()
+                    return
+
+                # Forward 101 response to client, then raw bidirectional pipe
+                client_writer.write(resp_data)
+                await client_writer.drain()
+                await asyncio.gather(
+                    self._pipe(upstream_reader, client_writer),
+                    self._pipe(client_reader, upstream_writer),
+                    return_exceptions=True,
+                )
+                return
+
             # Read the request body
             content_length_str = req_headers.get("content-length")
             req_transfer = req_headers.get("transfer-encoding", "").lower()

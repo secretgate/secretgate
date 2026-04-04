@@ -1103,3 +1103,239 @@ class TestH2Tunnel:
         finally:
             echo_server.close()
             await echo_server.wait_closed()
+
+
+async def _run_websocket_echo_server(ca: CertAuthority, host: str = "127.0.0.1"):
+    """HTTPS server that accepts WebSocket upgrades and echoes one message back."""
+    ssl_ctx = ca.get_domain_context(host)
+
+    async def handle(reader, writer):
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = await reader.read(4096)
+            if not chunk:
+                writer.close()
+                return
+            data += chunk
+
+        headers_text = data.split(b"\r\n\r\n")[0].decode("latin-1")
+        headers = {}
+        for line in headers_text.split("\r\n")[1:]:
+            if ":" in line:
+                k, v = line.split(":", 1)
+                headers[k.strip().lower()] = v.strip()
+
+        if headers.get("upgrade", "").lower() != "websocket":
+            writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+            await writer.drain()
+            writer.close()
+            return
+
+        # Send 101 Switching Protocols
+        import hashlib
+        import base64
+
+        ws_key = headers.get("sec-websocket-key", "")
+        accept = base64.b64encode(
+            hashlib.sha1((ws_key + "258EAFA5-E914-47DA-95CA-5AB5DC85B175").encode()).digest()
+        ).decode()
+        response = (
+            f"HTTP/1.1 101 Switching Protocols\r\n"
+            f"Upgrade: websocket\r\n"
+            f"Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Accept: {accept}\r\n"
+            f"\r\n"
+        ).encode()
+        writer.write(response)
+        await writer.drain()
+
+        # Read one WebSocket frame and echo it back
+        # Minimal frame parsing: client frames are masked (RFC 6455)
+        try:
+            frame_header = await asyncio.wait_for(reader.read(2), timeout=5.0)
+            if len(frame_header) < 2:
+                writer.close()
+                return
+            payload_len = frame_header[1] & 0x7F
+            is_masked = bool(frame_header[1] & 0x80)
+            if payload_len == 126:
+                ext = await reader.read(2)
+                payload_len = int.from_bytes(ext, "big")
+            elif payload_len == 127:
+                ext = await reader.read(8)
+                payload_len = int.from_bytes(ext, "big")
+
+            mask_key = b""
+            if is_masked:
+                mask_key = await reader.read(4)
+
+            payload = await reader.read(payload_len)
+            if is_masked:
+                payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+
+            # Send unmasked text frame back
+            resp_frame = bytes([0x81, len(payload)]) + payload
+            writer.write(resp_frame)
+            await writer.drain()
+        except Exception:
+            pass
+        writer.close()
+
+    server = await asyncio.start_server(handle, host, 0, ssl=ssl_ctx)
+    return server
+
+
+async def _run_rejecting_upgrade_server(ca: CertAuthority, host: str = "127.0.0.1"):
+    """HTTPS server that rejects WebSocket upgrades with 403."""
+    ssl_ctx = ca.get_domain_context(host)
+
+    async def handle(reader, writer):
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = await reader.read(4096)
+            if not chunk:
+                writer.close()
+                return
+            data += chunk
+        body = b"WebSocket not allowed"
+        response = (
+            b"HTTP/1.1 403 Forbidden\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+            b"Connection: close\r\n"
+            b"\r\n" + body
+        )
+        writer.write(response)
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(handle, host, 0, ssl=ssl_ctx)
+    return server
+
+
+class TestWebSocketPassthrough:
+    """WebSocket upgrade requests should be detected and passed through."""
+
+    async def _connect_and_tls(self, ca, port, echo_port):
+        """Helper: CONNECT to proxy, TLS handshake, return (reader, writer)."""
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        connect_req = (
+            f"CONNECT 127.0.0.1:{echo_port} HTTP/1.1\r\nHost: 127.0.0.1:{echo_port}\r\n\r\n"
+        )
+        writer.write(connect_req.encode())
+        await writer.drain()
+        response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+        assert b"200 Connection Established" in response
+
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ssl_ctx.load_verify_locations(str(ca.ca_cert_path))
+        await writer.start_tls(ssl_ctx, server_hostname="127.0.0.1")
+        return reader, writer
+
+    async def test_websocket_upgrade_passthrough(self, ca, proxy_server):
+        """WebSocket upgrade should be forwarded and bidirectional pipe established."""
+        _, port = proxy_server
+
+        echo_server = await _run_websocket_echo_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await self._connect_and_tls(ca, port, echo_port)
+
+            # Send WebSocket upgrade request
+            upgrade_req = (
+                b"GET /ws HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Upgrade: websocket\r\n"
+                b"Connection: Upgrade\r\n"
+                b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                b"Sec-WebSocket-Version: 13\r\n"
+                b"\r\n"
+            )
+            writer.write(upgrade_req)
+            await writer.drain()
+
+            # Should receive 101 Switching Protocols
+            resp = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"101 Switching Protocols" in resp
+            assert b"Upgrade: websocket" in resp
+
+            # Send a masked WebSocket text frame
+            payload = b"hello websocket"
+            mask_key = b"\x01\x02\x03\x04"
+            masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+            frame = bytes([0x81, 0x80 | len(payload)]) + mask_key + masked
+            writer.write(frame)
+            await writer.drain()
+
+            # Read echoed frame (unmasked from server)
+            echo_frame = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert len(echo_frame) >= 2
+            echo_payload_len = echo_frame[1] & 0x7F
+            echo_payload = echo_frame[2 : 2 + echo_payload_len]
+            assert echo_payload == b"hello websocket"
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
+
+    async def test_non_websocket_request_still_scanned(self, ca, proxy_server):
+        """Regular POST requests should still go through scanning, not the WebSocket path."""
+        _, port = proxy_server
+
+        echo_server = await _run_echo_https_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await self._connect_and_tls(ca, port, echo_port)
+
+            body = b"secret=AKIAIOSFODNN7EXAMPLE"
+            inner_request = (
+                b"POST /test HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: text/plain\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"\r\n" + body
+            )
+            writer.write(inner_request)
+            await writer.drain()
+
+            inner_response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 OK" in inner_response
+            assert b"AKIAIOSFODNN7EXAMPLE" not in inner_response
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
+
+    async def test_websocket_upgrade_rejected_by_upstream(self, ca, proxy_server):
+        """If upstream rejects the upgrade (non-101), the error should be forwarded to client."""
+        _, port = proxy_server
+
+        reject_server = await _run_rejecting_upgrade_server(ca)
+        reject_port = reject_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await self._connect_and_tls(ca, port, reject_port)
+
+            upgrade_req = (
+                b"GET /ws HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Upgrade: websocket\r\n"
+                b"Connection: Upgrade\r\n"
+                b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                b"Sec-WebSocket-Version: 13\r\n"
+                b"\r\n"
+            )
+            writer.write(upgrade_req)
+            await writer.drain()
+
+            resp = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"403 Forbidden" in resp
+            assert b"WebSocket not allowed" in resp
+
+            writer.close()
+        finally:
+            reject_server.close()
+            await reject_server.wait_closed()
