@@ -1104,6 +1104,135 @@ class TestH2Tunnel:
             echo_server.close()
             await echo_server.wait_closed()
 
+    async def test_h2_large_response_flow_control(self, ca, proxy_server):
+        """Large responses exceeding the H2 flow control window must arrive intact."""
+        _, port = proxy_server
+
+        # 200KB response — well over the default 64KB H2 window
+        echo_server, expected_body = await _run_h2_large_response_server(ca, 200_000)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer, h2_conn = await _h2_connect_and_upgrade(ca, port, echo_port)
+
+            headers = [
+                (":method", "GET"),
+                (":path", "/large"),
+                (":scheme", "https"),
+                (":authority", "127.0.0.1"),
+            ]
+            stream_id = await _h2_send_request(h2_conn, writer, headers)
+
+            status, _, body = await _h2_read_response(
+                reader, h2_conn, writer, stream_id, timeout=15.0
+            )
+            assert status == 200
+            assert len(body) == len(expected_body)
+            assert body == expected_body
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
+
+
+async def _run_h2_large_response_server(
+    ca: CertAuthority, response_size: int, host: str = "127.0.0.1"
+):
+    """H2 server that returns a large response body, handling flow control properly."""
+    ssl_ctx = ca.get_domain_context(host)
+    # Generate deterministic response data
+    pattern = b"ABCDEFGHIJKLMNOP"  # 16 bytes
+    response_body = (pattern * (response_size // len(pattern) + 1))[:response_size]
+
+    async def handle(reader, writer):
+        config = h2.config.H2Configuration(client_side=False)
+        conn = h2.connection.H2Connection(config=config)
+        conn.initiate_connection()
+        writer.write(conn.data_to_send())
+        await writer.drain()
+
+        pending: dict[int, tuple[bytes, int]] = {}  # stream_id -> (remaining_data, offset)
+
+        try:
+            while True:
+                data = await reader.read(65536)
+                if not data:
+                    break
+
+                events = conn.receive_data(data)
+                for event in events:
+                    if isinstance(event, h2.events.RequestReceived):
+                        pass  # wait for stream end
+
+                    elif isinstance(event, h2.events.DataReceived):
+                        conn.acknowledge_received_data(
+                            event.flow_controlled_length, event.stream_id
+                        )
+
+                    elif isinstance(event, h2.events.StreamEnded):
+                        resp_headers = [
+                            (":status", "200"),
+                            ("content-type", "application/octet-stream"),
+                            ("content-length", str(len(response_body))),
+                        ]
+                        conn.send_headers(event.stream_id, resp_headers)
+                        # Send as much as flow control allows
+                        offset = 0
+                        while offset < len(response_body):
+                            window = conn.local_flow_control_window(event.stream_id)
+                            if window <= 0:
+                                pending[event.stream_id] = (response_body, offset)
+                                break
+                            chunk_size = min(
+                                window, conn.max_outbound_frame_size, len(response_body) - offset
+                            )
+                            is_last = offset + chunk_size >= len(response_body)
+                            conn.send_data(
+                                event.stream_id,
+                                response_body[offset : offset + chunk_size],
+                                end_stream=is_last,
+                            )
+                            offset += chunk_size
+                        else:
+                            pending.pop(event.stream_id, None)
+
+                    elif isinstance(event, h2.events.WindowUpdated):
+                        sid = event.stream_id
+                        targets = list(pending.keys()) if sid == 0 else [sid]
+                        for s in targets:
+                            if s not in pending:
+                                continue
+                            body_data, off = pending[s]
+                            while off < len(body_data):
+                                w = conn.local_flow_control_window(s)
+                                if w <= 0:
+                                    break
+                                cs = min(w, conn.max_outbound_frame_size, len(body_data) - off)
+                                is_last = off + cs >= len(body_data)
+                                conn.send_data(s, body_data[off : off + cs], end_stream=is_last)
+                                off += cs
+                            if off >= len(body_data):
+                                del pending[s]
+                            else:
+                                pending[s] = (body_data, off)
+
+                    elif isinstance(event, h2.events.ConnectionTerminated):
+                        writer.write(conn.data_to_send())
+                        await writer.drain()
+                        return
+
+                writer.write(conn.data_to_send())
+                await writer.drain()
+        except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            if not writer.is_closing():
+                writer.close()
+
+    server = await asyncio.start_server(handle, host, 0, ssl=ssl_ctx)
+    return server, response_body
+
 
 async def _run_websocket_echo_server(ca: CertAuthority, host: str = "127.0.0.1"):
     """HTTPS server that accepts WebSocket upgrades and echoes one message back."""

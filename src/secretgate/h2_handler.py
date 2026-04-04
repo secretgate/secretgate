@@ -90,6 +90,9 @@ class H2ConnectionHandler:
         self._client_writer: asyncio.StreamWriter | None = None
         self._upstream_writer: asyncio.StreamWriter | None = None
         self._upstream_reader: asyncio.StreamReader | None = None
+        # Pending outbound data blocked by flow control (stream_id -> (bytes, end_stream))
+        self._client_pending: dict[int, tuple[bytes, bool]] = {}
+        self._upstream_pending: dict[int, tuple[bytes, bool]] = {}
 
     def _init_upstream_h2(self) -> None:
         """Create a fresh upstream h2 connection state machine."""
@@ -98,6 +101,8 @@ class H2ConnectionHandler:
         )
         self._streams.clear()
         self._upstream_to_client.clear()
+        self._client_pending.clear()
+        self._upstream_pending.clear()
 
     def _make_h2_ssl_context(self) -> ssl.SSLContext:
         """Create a fresh SSL context with h2 ALPN, without mutating the shared one."""
@@ -296,7 +301,8 @@ class H2ConnectionHandler:
             await self._on_client_stream_reset(event.stream_id)
 
         elif isinstance(event, h2.events.WindowUpdated):
-            pass
+            # Client sent WINDOW_UPDATE — flush pending response data
+            self._drain_pending(self._client_conn, self._client_pending, event.stream_id)
 
         elif isinstance(event, h2.events.ConnectionTerminated):
             logger.debug("h2_client_goaway", host=self._host)
@@ -317,7 +323,8 @@ class H2ConnectionHandler:
             await self._on_upstream_stream_reset(event.stream_id)
 
         elif isinstance(event, h2.events.WindowUpdated):
-            pass
+            # Upstream sent WINDOW_UPDATE — flush pending request data
+            self._drain_pending(self._upstream_conn, self._upstream_pending, event.stream_id)
 
         elif isinstance(event, h2.events.ConnectionTerminated):
             logger.debug("h2_upstream_goaway", host=self._host)
@@ -417,9 +424,11 @@ class H2ConnectionHandler:
         )
 
         if scanned_body:
-            self._send_data_with_flow_control(
+            remaining, es = self._send_data_with_flow_control(
                 self._upstream_conn, upstream_stream_id, scanned_body, end_stream=True
             )
+            if remaining:
+                self._upstream_pending[upstream_stream_id] = (remaining, es)
 
     # --- Upstream response handling ---
 
@@ -451,10 +460,18 @@ class H2ConnectionHandler:
         # Acknowledge upstream data
         self._upstream_conn.acknowledge_received_data(flow_controlled_length, upstream_stream_id)
 
+        # If there's already pending data for this stream, just append
+        if client_stream_id in self._client_pending:
+            existing, es = self._client_pending[client_stream_id]
+            self._client_pending[client_stream_id] = (existing + data, es)
+            return
+
         # Forward to client
-        self._send_data_with_flow_control(
+        remaining, es = self._send_data_with_flow_control(
             self._client_conn, client_stream_id, data, end_stream=False
         )
+        if remaining:
+            self._client_pending[client_stream_id] = (remaining, es)
 
     async def _on_response_complete(self, upstream_stream_id: int) -> None:
         """Upstream finished sending response (END_STREAM)."""
@@ -462,10 +479,13 @@ class H2ConnectionHandler:
         if client_stream_id is None:
             return
 
-        self._client_conn.end_stream(client_stream_id)
-
-        # Cleanup
-        self._cleanup_stream(client_stream_id, upstream_stream_id)
+        if client_stream_id in self._client_pending:
+            # Pending data still buffered — mark end_stream for when drain completes
+            data, _ = self._client_pending[client_stream_id]
+            self._client_pending[client_stream_id] = (data, True)
+        else:
+            self._client_conn.end_stream(client_stream_id)
+            self._cleanup_stream(client_stream_id, upstream_stream_id)
 
     # --- Stream reset handling ---
 
@@ -497,6 +517,35 @@ class H2ConnectionHandler:
         """Remove stream tracking state."""
         self._streams.pop(client_stream_id, None)
         self._upstream_to_client.pop(upstream_stream_id, None)
+        self._client_pending.pop(client_stream_id, None)
+        self._upstream_pending.pop(upstream_stream_id, None)
+
+    def _drain_pending(
+        self,
+        conn: h2.connection.H2Connection,
+        pending: dict[int, tuple[bytes, bool]],
+        stream_id: int,
+    ) -> None:
+        """Flush pending data after a WindowUpdated event.
+
+        stream_id=0 is a connection-level update — try all pending streams.
+        """
+        targets = list(pending.keys()) if stream_id == 0 else [stream_id]
+        for sid in targets:
+            if sid not in pending:
+                continue
+            data, end_stream = pending[sid]
+            remaining, es = self._send_data_with_flow_control(conn, sid, data, end_stream)
+            if remaining:
+                pending[sid] = (remaining, es)
+            else:
+                del pending[sid]
+                # If this was client-side pending with end_stream, cleanup the stream
+                if end_stream and pending is self._client_pending:
+                    # end_stream was already sent by _send_data_with_flow_control
+                    state = self._streams.get(sid)
+                    if state and state.upstream_stream_id is not None:
+                        self._cleanup_stream(sid, state.upstream_stream_id)
 
     def _send_data_with_flow_control(
         self,
@@ -504,28 +553,23 @@ class H2ConnectionHandler:
         stream_id: int,
         data: bytes,
         end_stream: bool,
-    ) -> None:
+    ) -> tuple[bytes, bool]:
         """Send data respecting h2 flow control windows.
 
-        Sends as much data as the flow control window allows. If the window
-        is exhausted, remaining data is silently dropped — the reader loops
-        will process WINDOW_UPDATE events and the peer will retransmit or
-        the connection will be reset. For typical API request/response sizes
-        (< 64KB) this is not an issue since the default window is 64KB.
+        Returns (unsent_data, pending_end_stream). If unsent_data is non-empty,
+        the caller must buffer it and retry when a WindowUpdated event arrives.
         """
         offset = 0
         while offset < len(data):
             window = conn.local_flow_control_window(stream_id)
             if window <= 0:
-                # Window exhausted — send end_stream on a zero-length frame if needed
-                if end_stream:
-                    conn.send_data(stream_id, b"", end_stream=True)
-                break
+                return data[offset:], end_stream
             max_size = min(window, conn.max_outbound_frame_size)
             chunk = data[offset : offset + max_size]
             is_last = (offset + len(chunk) >= len(data)) and end_stream
             conn.send_data(stream_id, chunk, end_stream=is_last)
             offset += len(chunk)
+        return b"", False
 
     async def _send_client_error(
         self,
@@ -545,7 +589,11 @@ class H2ConnectionHandler:
             ("content-length", str(len(error_body))),
         ]
         self._client_conn.send_headers(stream_id, response_headers)
-        self._send_data_with_flow_control(self._client_conn, stream_id, error_body, end_stream=True)
+        remaining, es = self._send_data_with_flow_control(
+            self._client_conn, stream_id, error_body, end_stream=True
+        )
+        if remaining:
+            self._client_pending[stream_id] = (remaining, es)
         await self._flush_client()
 
         # Cleanup — no upstream stream was created
