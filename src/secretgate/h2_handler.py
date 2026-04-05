@@ -245,28 +245,12 @@ class H2ConnectionHandler:
                 except (asyncio.CancelledError, Exception):
                     pass
                 exc = client_task.exception()
-                logger.warning(
-                    "h2_relay_client_done",
-                    host=self._host,
-                    error=type(exc).__name__ if exc else None,
-                    streams=len(self._streams),
-                )
                 if exc and not isinstance(
                     exc, (ConnectionResetError, BrokenPipeError, asyncio.CancelledError)
                 ):
                     raise exc
                 return
 
-            # Upstream task completed — check why
-            up_exc = upstream_task.exception() if not upstream_task.cancelled() else None
-            logger.warning(
-                "h2_relay_upstream_done",
-                host=self._host,
-                error=type(up_exc).__name__ if up_exc else "EOF",
-                detail=str(up_exc)[:200] if up_exc else None,
-                streams=len(self._streams),
-                pending_client=len(self._client_pending),
-            )
             client_task.cancel()
             try:
                 await client_task
@@ -318,12 +302,11 @@ class H2ConnectionHandler:
         while True:
             data = await reader.read(65536)
             if not data:
-                logger.warning("h2_client_eof", host=self._host)
                 return
             try:
                 events = self._client_conn.receive_data(data)
             except Exception as exc:
-                logger.error(
+                logger.debug(
                     "h2_client_receive_error",
                     host=self._host,
                     error=type(exc).__name__,
@@ -340,12 +323,11 @@ class H2ConnectionHandler:
         while True:
             data = await self._upstream_reader.read(65536)
             if not data:
-                logger.warning("h2_upstream_eof", host=self._host)
                 return
             try:
                 events = self._upstream_conn.receive_data(data)
             except Exception as exc:
-                logger.error(
+                logger.debug(
                     "h2_upstream_receive_error",
                     host=self._host,
                     error=type(exc).__name__,
