@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 import h2.config
 import h2.connection
 import h2.events
+import h2.settings
 import structlog
 
 from secretgate.scan import BlockedError, TextScanner
@@ -23,6 +24,11 @@ logger = structlog.get_logger()
 
 # Match forward.py's limit
 MAX_BODY_SIZE = 10 * 1024 * 1024  # 10MB
+
+# H2 flow control: default 65,535 bytes is far too small for proxying
+# resource-heavy pages with many concurrent streams. Production proxies
+# (nginx, envoy) use multi-MB windows. 16MB matches Go's default.
+H2_WINDOW_SIZE = 16 * 1024 * 1024  # 16MB
 
 # Auth path pattern — same as forward.py (duplicated to avoid circular import)
 _AUTH_PATH_PATTERNS = re.compile(
@@ -94,6 +100,21 @@ class H2ConnectionHandler:
         self._client_pending: dict[int, tuple[bytes, bool]] = {}
         self._upstream_pending: dict[int, tuple[bytes, bool]] = {}
 
+    @staticmethod
+    def _apply_window_settings(conn: h2.connection.H2Connection) -> None:
+        """Set large flow control windows after initiate_connection().
+
+        The default 64KB window is far too small for proxying heavy pages.
+        We increase both the per-stream initial window (via SETTINGS) and
+        the connection-level window (via WINDOW_UPDATE).
+        """
+        conn.update_settings(
+            {
+                h2.settings.SettingCodes.INITIAL_WINDOW_SIZE: H2_WINDOW_SIZE,
+            }
+        )
+        conn.increment_flow_control_window(H2_WINDOW_SIZE - 65535)
+
     def _init_upstream_h2(self) -> None:
         """Create a fresh upstream h2 connection state machine."""
         self._upstream_conn = h2.connection.H2Connection(
@@ -139,6 +160,7 @@ class H2ConnectionHandler:
 
         self._init_upstream_h2()
         self._upstream_conn.initiate_connection()
+        self._apply_window_settings(self._upstream_conn)
         await self._flush_upstream()
         return True
 
@@ -153,6 +175,7 @@ class H2ConnectionHandler:
         """
         self._client_writer = client_writer
         self._client_conn.initiate_connection()
+        self._apply_window_settings(self._client_conn)
         await self._flush_client()
 
         if not await self._connect_upstream():
@@ -173,10 +196,12 @@ class H2ConnectionHandler:
         self._upstream_writer = upstream_writer
 
         self._client_conn.initiate_connection()
+        self._apply_window_settings(self._client_conn)
         await self._flush_client()
 
         self._init_upstream_h2()
         self._upstream_conn.initiate_connection()
+        self._apply_window_settings(self._upstream_conn)
         await self._flush_upstream()
 
         await self._relay_loop(client_reader)
@@ -453,12 +478,13 @@ class H2ConnectionHandler:
         self, upstream_stream_id: int, data: bytes, flow_controlled_length: int
     ) -> None:
         """Upstream sent response body data — relay to client."""
+        # Always acknowledge to keep the connection-level flow control window open,
+        # even if the stream was already cleaned up (race with reset/complete).
+        self._upstream_conn.acknowledge_received_data(flow_controlled_length, upstream_stream_id)
+
         client_stream_id = self._upstream_to_client.get(upstream_stream_id)
         if client_stream_id is None:
             return
-
-        # Acknowledge upstream data
-        self._upstream_conn.acknowledge_received_data(flow_controlled_length, upstream_stream_id)
 
         # If there's already pending data for this stream, just append
         if client_stream_id in self._client_pending:
