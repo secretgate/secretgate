@@ -69,6 +69,15 @@ class _StreamState:
     skip_scan: bool = False
 
 
+@dataclass
+class _QueuedRequest:
+    """A scanned request waiting for an upstream stream slot."""
+
+    client_stream_id: int
+    headers: list[tuple[str, str]]
+    body: bytes
+
+
 class H2ConnectionHandler:
     """Handles HTTP/2 relay between client and upstream through the MITM tunnel."""
 
@@ -100,6 +109,8 @@ class H2ConnectionHandler:
         # Pending outbound data blocked by flow control (stream_id -> (bytes, end_stream))
         self._client_pending: dict[int, tuple[bytes, bool]] = {}
         self._upstream_pending: dict[int, tuple[bytes, bool]] = {}
+        # Requests queued because upstream MAX_CONCURRENT_STREAMS was reached
+        self._queued_requests: list[_QueuedRequest] = []
 
     @staticmethod
     def _apply_window_settings(conn: h2.connection.H2Connection) -> None:
@@ -125,6 +136,7 @@ class H2ConnectionHandler:
         self._upstream_to_client.clear()
         self._client_pending.clear()
         self._upstream_pending.clear()
+        self._queued_requests.clear()
 
     def _make_h2_ssl_context(self) -> ssl.SSLContext:
         """Create a fresh SSL context with h2 ALPN, without mutating the shared one."""
@@ -470,24 +482,58 @@ class H2ConnectionHandler:
             else:
                 new_headers.append((n, v))
 
-        # Forward to upstream
-        upstream_stream_id = self._upstream_conn.get_next_available_stream_id()
+        # Forward to upstream — queue if MAX_CONCURRENT_STREAMS reached
+        if not self._forward_to_upstream(stream_id, new_headers, scanned_body):
+            # Stream limit reached — queue for later
+            self._queued_requests.append(
+                _QueuedRequest(client_stream_id=stream_id, headers=new_headers, body=scanned_body)
+            )
+            logger.debug(
+                "h2_request_queued",
+                host=self._host,
+                client_stream=stream_id,
+                queue_depth=len(self._queued_requests),
+            )
+
+    def _forward_to_upstream(
+        self, client_stream_id: int, headers: list[tuple[str, str]], body: bytes
+    ) -> bool:
+        """Try to forward a request to upstream. Returns False if stream limit reached."""
+        try:
+            upstream_stream_id = self._upstream_conn.get_next_available_stream_id()
+        except h2.exceptions.NoAvailableStreamIDError:
+            return False
+
+        state = self._streams.get(client_stream_id)
+        if state is None:
+            return True  # stream was reset while queued — discard silently
+
+        try:
+            self._upstream_conn.send_headers(
+                upstream_stream_id, headers, end_stream=(len(body) == 0)
+            )
+        except h2.exceptions.TooManyStreamsError:
+            return False
+
         state.upstream_stream_id = upstream_stream_id
-        self._upstream_to_client[upstream_stream_id] = stream_id
+        self._upstream_to_client[upstream_stream_id] = client_stream_id
 
-        send_end_stream = len(scanned_body) == 0
-        self._upstream_conn.send_headers(
-            upstream_stream_id,
-            new_headers,
-            end_stream=send_end_stream,
-        )
-
-        if scanned_body:
+        if body:
             remaining, es = self._send_data_with_flow_control(
-                self._upstream_conn, upstream_stream_id, scanned_body, end_stream=True
+                self._upstream_conn, upstream_stream_id, body, end_stream=True
             )
             if remaining:
                 self._upstream_pending[upstream_stream_id] = (remaining, es)
+
+        return True
+
+    def _drain_queued_requests(self) -> None:
+        """Send queued requests when upstream stream slots free up."""
+        while self._queued_requests:
+            req = self._queued_requests[0]
+            if not self._forward_to_upstream(req.client_stream_id, req.headers, req.body):
+                break  # still at limit
+            self._queued_requests.pop(0)
 
     # --- Upstream response handling ---
 
@@ -554,10 +600,17 @@ class H2ConnectionHandler:
                 pass  # stream already gone
             self._cleanup_stream(client_stream_id, upstream_stream_id)
 
+        # Upstream stream slot freed — send queued requests
+        self._drain_queued_requests()
+
     # --- Stream reset handling ---
 
     async def _on_client_stream_reset(self, stream_id: int) -> None:
         """Client reset a stream — propagate to upstream."""
+        # Remove from queue if it hasn't been sent yet
+        self._queued_requests = [
+            q for q in self._queued_requests if q.client_stream_id != stream_id
+        ]
         state = self._streams.get(stream_id)
         if state and state.upstream_stream_id is not None:
             try:
@@ -577,6 +630,7 @@ class H2ConnectionHandler:
             except Exception:
                 pass
             self._cleanup_stream(client_stream_id, upstream_stream_id)
+            self._drain_queued_requests()
 
     # --- Helpers ---
 
