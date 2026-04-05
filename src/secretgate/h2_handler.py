@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 import h2.config
 import h2.connection
 import h2.events
+import h2.exceptions
 import h2.settings
 import structlog
 
@@ -472,7 +473,11 @@ class H2ConnectionHandler:
             v = value.decode("utf-8") if isinstance(value, bytes) else value
             decoded.append((n, v))
 
-        self._client_conn.send_headers(client_stream_id, decoded)
+        try:
+            self._client_conn.send_headers(client_stream_id, decoded)
+        except (h2.exceptions.StreamClosedError, h2.exceptions.ProtocolError):
+            logger.debug("h2_stream_closed_on_headers", stream_id=client_stream_id)
+            self._cleanup_stream(client_stream_id, upstream_stream_id)
 
     async def _on_response_data(
         self, upstream_stream_id: int, data: bytes, flow_controlled_length: int
@@ -510,7 +515,10 @@ class H2ConnectionHandler:
             data, _ = self._client_pending[client_stream_id]
             self._client_pending[client_stream_id] = (data, True)
         else:
-            self._client_conn.end_stream(client_stream_id)
+            try:
+                self._client_conn.end_stream(client_stream_id)
+            except (h2.exceptions.StreamClosedError, h2.exceptions.ProtocolError):
+                pass  # stream already gone
             self._cleanup_stream(client_stream_id, upstream_stream_id)
 
     # --- Stream reset handling ---
@@ -584,16 +592,23 @@ class H2ConnectionHandler:
 
         Returns (unsent_data, pending_end_stream). If unsent_data is non-empty,
         the caller must buffer it and retry when a WindowUpdated event arrives.
+        Returns (b"", False) if stream was closed — caller should discard.
         """
         offset = 0
         while offset < len(data):
-            window = conn.local_flow_control_window(stream_id)
+            try:
+                window = conn.local_flow_control_window(stream_id)
+            except (h2.exceptions.StreamClosedError, h2.exceptions.ProtocolError):
+                return b"", False  # stream gone, discard
             if window <= 0:
                 return data[offset:], end_stream
             max_size = min(window, conn.max_outbound_frame_size)
             chunk = data[offset : offset + max_size]
             is_last = (offset + len(chunk) >= len(data)) and end_stream
-            conn.send_data(stream_id, chunk, end_stream=is_last)
+            try:
+                conn.send_data(stream_id, chunk, end_stream=is_last)
+            except (h2.exceptions.StreamClosedError, h2.exceptions.ProtocolError):
+                return b"", False  # stream gone, discard
             offset += len(chunk)
         return b"", False
 
