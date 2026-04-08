@@ -516,17 +516,37 @@ class _ConnectionHandler:
             else:
                 content_length = len(body)
 
+            # Per-request scan overrides via X-Secretgate-* headers.
+            # Strip them before forwarding so they never reach the upstream.
+            scan_mode_override = req_headers.pop("x-secretgate-mode", None)
+            if scan_mode_override and scan_mode_override not in ("redact", "audit", "block"):
+                scan_mode_override = None
+            skip_scan_header = req_headers.pop("x-secretgate-skip", "").lower() in ("1", "true")
+            if scan_mode_override or skip_scan_header:
+                headers_text = headers_bytes.decode("latin-1")
+                headers_text = re.sub(r"(?i)x-secretgate-mode:\s*[^\r\n]*\r\n", "", headers_text)
+                headers_text = re.sub(r"(?i)x-secretgate-skip:\s*[^\r\n]*\r\n", "", headers_text)
+                headers_bytes = headers_text.encode("latin-1")
+                if scan_mode_override:
+                    logger.debug(
+                        "forward_scan_mode_override", host=host, mode=scan_mode_override
+                    )
+                if skip_scan_header:
+                    logger.debug("forward_scan_skip_header", host=host)
+
             # Scan outbound request body (skip auth endpoints to avoid
             # redacting OAuth tokens / refresh tokens)
             req_path = request_line.split(" ", 2)[1] if request_line else ""
             content_type = req_headers.get("content-type", "application/octet-stream")
             scanned_body = body
-            skip_scan = self._is_auth_path(req_path)
-            if skip_scan:
+            skip_scan = self._is_auth_path(req_path) or skip_scan_header
+            if self._is_auth_path(req_path):
                 logger.debug("forward_skip_auth_path", host=host, path=req_path)
             if body and content_length > 0 and not skip_scan:
                 try:
-                    scanned_body, alerts = self._scanner.scan_body(body, content_type)
+                    scanned_body, alerts = self._scanner.scan_body(
+                        body, content_type, mode_override=scan_mode_override
+                    )
                     for alert in alerts:
                         logger.warning("forward_proxy_alert", host=host, alert=alert)
                 except BlockedError as exc:
