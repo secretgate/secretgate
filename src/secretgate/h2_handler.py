@@ -442,11 +442,22 @@ class H2ConnectionHandler:
                 content_type = v
                 break
 
+        # Extract auth token so we never redact the request's own
+        # credential when it also appears in the body (issue #64).
+        exclude_values: set[str] = set()
+        for n, v in headers:
+            if n == "authorization" and v:
+                parts = v.split(None, 1)
+                exclude_values.add(parts[-1] if parts else v)
+                break
+
         # Scan the request body
         scanned_body = body
         if body and not state.skip_scan:
             try:
-                scanned_body, alerts = self._scanner.scan_body(body, content_type)
+                scanned_body, alerts = self._scanner.scan_body(
+                    body, content_type, exclude_values=exclude_values
+                )
                 for alert in alerts:
                     logger.warning("h2_forward_proxy_alert", host=self._host, alert=alert)
             except BlockedError as exc:

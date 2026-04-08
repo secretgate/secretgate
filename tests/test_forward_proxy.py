@@ -639,6 +639,104 @@ class TestAuthPathSkip:
             await echo_server.wait_closed()
 
 
+class TestAuthTokenExclusion:
+    """Auth tokens in the request body should not be redacted when they match the Authorization header."""
+
+    async def test_jwt_in_body_not_redacted_when_in_auth_header(self, ca, proxy_server):
+        """A JWT that is both in the Authorization header and the body should not be redacted (issue #64)."""
+        _, port = proxy_server
+
+        echo_server = await _run_echo_https_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+
+            connect_req = (
+                f"CONNECT 127.0.0.1:{echo_port} HTTP/1.1\r\nHost: 127.0.0.1:{echo_port}\r\n\r\n"
+            )
+            writer.write(connect_req.encode())
+            await writer.drain()
+
+            response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 Connection Established" in response
+
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx.load_verify_locations(str(ca.ca_cert_path))
+            await writer.start_tls(ssl_ctx, server_hostname="127.0.0.1")
+
+            # Simulate wrangler deploy: JWT in both the Authorization header and the
+            # multipart body metadata.
+            jwt = b"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.sig_value_here"
+            body = b'{"metadata":{"token":"' + jwt + b'"}}'
+            inner_request = (
+                b"POST /workers/scripts/bugdrop/versions HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Authorization: Bearer " + jwt + b"\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"\r\n" + body
+            )
+            writer.write(inner_request)
+            await writer.drain()
+
+            inner_response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 OK" in inner_response
+            # The JWT should NOT be redacted — it's the request's own auth token
+            assert jwt in inner_response
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
+
+    async def test_other_secrets_still_redacted_with_auth_header(self, ca, proxy_server):
+        """Unrelated secrets in the body should still be redacted even when an auth header is present."""
+        _, port = proxy_server
+
+        echo_server = await _run_echo_https_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+
+            connect_req = (
+                f"CONNECT 127.0.0.1:{echo_port} HTTP/1.1\r\nHost: 127.0.0.1:{echo_port}\r\n\r\n"
+            )
+            writer.write(connect_req.encode())
+            await writer.drain()
+
+            response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 Connection Established" in response
+
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx.load_verify_locations(str(ca.ca_cert_path))
+            await writer.start_tls(ssl_ctx, server_hostname="127.0.0.1")
+
+            jwt = b"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.sig_value_here"
+            body = b"leaked_key=AKIAIOSFODNN7EXAMPLE"
+            inner_request = (
+                b"POST /v1/deploy HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Authorization: Bearer " + jwt + b"\r\n"
+                b"Content-Type: application/x-www-form-urlencoded\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"\r\n" + body
+            )
+            writer.write(inner_request)
+            await writer.drain()
+
+            inner_response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 OK" in inner_response
+            # AWS key should still be redacted
+            assert b"AKIAIOSFODNN7EXAMPLE" not in inner_response
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
+
+
 class TestErrorResponses:
     async def test_502_when_upstream_drops_connection(self, ca, proxy_server):
         """Proxy should send 502 instead of EOF when upstream drops the connection."""
