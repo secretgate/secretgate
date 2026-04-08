@@ -149,12 +149,18 @@ class TextScanner:
 
         matches = self._scanner.scan(scannable)
 
-        # Drop matches whose value is part of the request's own auth token.
-        # This prevents redacting a legitimate OAuth/JWT credential that the
-        # app intentionally includes in the body (e.g. Cloudflare wrangler
-        # deploy multipart metadata).
+        # Drop matches that ARE the request's own auth token (not just any
+        # substring).  A match is considered "the same credential" when it
+        # covers ≥50 % of an exclude value's length — this allows partial
+        # regex captures (e.g. JWT pattern grabbing 2 of 3 segments) while
+        # preventing a short, unrelated secret from being silently skipped
+        # just because it happens to appear inside a long token string.
         if matches and exclude_values:
-            matches = [m for m in matches if not any(m.value in ev for ev in exclude_values)]
+            matches = [
+                m
+                for m in matches
+                if not any(m.value in ev and len(m.value) >= len(ev) * 0.5 for ev in exclude_values)
+            ]
 
         if not matches:
             return body, alerts

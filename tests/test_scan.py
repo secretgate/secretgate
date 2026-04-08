@@ -136,6 +136,24 @@ class TestScanBody:
         assert b"AKIAIOSFODNN7EXAMPLE" not in result
         assert len(alerts) > 0
 
+    def test_exclude_values_short_substring_not_suppressed(self, redact_scanner):
+        """A short secret that is a substring of the auth token must still be caught.
+
+        This guards against exfiltration via embedding a stolen secret inside
+        a crafted auth token.
+        """
+        # Construct a long fake auth token that embeds an AWS key as a substring
+        aws_key = "AKIAIOSFODNN7EXAMPLE"
+        long_token = f"prefix_{aws_key}_suffix_padding_to_make_it_very_long_token_value"
+        body = f'{{"key":"{aws_key}"}}'.encode()
+        result, alerts = redact_scanner.scan_body(
+            body, "application/json", exclude_values={long_token}
+        )
+        # AWS key is <50% of the long token, so it must NOT be excluded
+        assert b"AKIAIOSFODNN7EXAMPLE" not in result
+        assert b"REDACTED<" in result
+        assert len(alerts) > 0
+
 
 # ---------------------------------------------------------------------------
 # Format detection and stripping tests
