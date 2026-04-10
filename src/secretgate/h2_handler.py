@@ -20,10 +20,10 @@ import h2.settings
 import structlog
 
 from secretgate.scan import (
-    MAX_SESSION_TOKENS,
     BlockedError,
     TextScanner,
-    extract_session_tokens,
+    get_session_tokens,
+    remember_session_tokens,
 )
 
 logger = structlog.get_logger()
@@ -116,9 +116,6 @@ class H2ConnectionHandler:
         self._upstream_pending: dict[int, tuple[bytes, bool]] = {}
         # Requests queued because upstream MAX_CONCURRENT_STREAMS was reached
         self._queued_requests: list[_QueuedRequest] = []
-        # JWT tokens harvested from upstream response bodies on this connection.
-        # Used as exclusions when scanning subsequent request bodies (issue #66).
-        self._session_tokens: set[str] = set()
 
     @staticmethod
     def _apply_window_settings(conn: h2.connection.H2Connection) -> None:
@@ -453,8 +450,10 @@ class H2ConnectionHandler:
         # Extract auth token so we never redact the request's own
         # credential when it also appears in the body (issue #64).
         # Also include session tokens previously seen in upstream
-        # responses on this connection (issue #66).
-        exclude_values: set[str] = set(self._session_tokens)
+        # responses to the same host (issue #66).
+        exclude_values: set[str] = get_session_tokens(self._host)
+        if exclude_values:
+            logger.debug("h2_session_tokens_loaded", host=self._host, count=len(exclude_values))
         for n, v in headers:
             if n == "authorization" and v:
                 parts = v.split(None, 1)
@@ -571,11 +570,10 @@ class H2ConnectionHandler:
 
         # Harvest JWTs the upstream issues so we don't redact them when the
         # client echoes them back in a follow-up request body (issue #66).
-        if data and len(self._session_tokens) < MAX_SESSION_TOKENS:
-            for tok in extract_session_tokens(data):
-                if len(self._session_tokens) >= MAX_SESSION_TOKENS:
-                    break
-                self._session_tokens.add(tok)
+        if data:
+            added = remember_session_tokens(self._host, data)
+            if added:
+                logger.debug("h2_session_token_harvested", host=self._host, count=added)
 
         client_stream_id = self._upstream_to_client.get(upstream_stream_id)
         if client_stream_id is None:

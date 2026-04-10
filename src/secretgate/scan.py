@@ -23,9 +23,20 @@ logger = structlog.get_logger()
 # the client sends them back in a subsequent request body (issue #66).
 _JWT_RE = re.compile(rb"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_./+=-]+")
 
-# Bound the per-connection session-token set so a long-lived connection
-# streaming many JWT-shaped values cannot grow memory without limit.
+# Bound the per-host session-token set so a busy host cannot grow memory
+# without limit.  64 tokens per host is plenty (most APIs issue 1-3 long-lived
+# session tokens) and bounds total memory at ~64 * 64 hosts * ~2 KB each.
 MAX_SESSION_TOKENS = 64
+MAX_SESSION_HOSTS = 64
+
+# Module-level store of session tokens harvested from upstream responses,
+# keyed by host.  Shared across all forward-proxy connections so a token
+# observed on one TCP connection to host X is excluded from request scans
+# on a *different* TCP connection to the same host X.  Without this, a
+# client like wrangler that uses a connection pool would not benefit from
+# session-token tracking, because /assets-upload-session and /versions
+# could land on different sockets and therefore different handler instances.
+_SESSION_TOKENS_BY_HOST: dict[str, set[str]] = {}
 
 
 def extract_session_tokens(data: bytes) -> set[str]:
@@ -38,6 +49,47 @@ def extract_session_tokens(data: bytes) -> set[str]:
     if not data or b"eyJ" not in data:
         return set()
     return {m.group(0).decode("ascii", errors="replace") for m in _JWT_RE.finditer(data)}
+
+
+def remember_session_tokens(host: str, data: bytes) -> int:
+    """Harvest JWTs from ``data`` and remember them under ``host``.
+
+    Returns the number of new tokens added.  Bounded per-host to
+    ``MAX_SESSION_TOKENS`` and per-process to ``MAX_SESSION_HOSTS`` hosts so
+    a long-running proxy cannot grow memory without limit.
+    """
+    if not host or not data:
+        return 0
+    tokens = extract_session_tokens(data)
+    if not tokens:
+        return 0
+    bucket = _SESSION_TOKENS_BY_HOST.get(host)
+    if bucket is None:
+        if len(_SESSION_TOKENS_BY_HOST) >= MAX_SESSION_HOSTS:
+            return 0
+        bucket = set()
+        _SESSION_TOKENS_BY_HOST[host] = bucket
+    added = 0
+    for tok in tokens:
+        if len(bucket) >= MAX_SESSION_TOKENS:
+            break
+        if tok not in bucket:
+            bucket.add(tok)
+            added += 1
+    return added
+
+
+def get_session_tokens(host: str) -> set[str]:
+    """Return tokens previously harvested from ``host`` upstream responses."""
+    if not host:
+        return set()
+    bucket = _SESSION_TOKENS_BY_HOST.get(host)
+    return set(bucket) if bucket else set()
+
+
+def clear_session_tokens() -> None:
+    """Clear all harvested session tokens.  Used by tests."""
+    _SESSION_TOKENS_BY_HOST.clear()
 
 
 # Content types that should never be scanned (binary data)

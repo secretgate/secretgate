@@ -13,7 +13,10 @@ from secretgate.scan import (
     _strip_cohere,
     _strip_gemini,
     _strip_messages_format,
+    clear_session_tokens,
     extract_session_tokens,
+    get_session_tokens,
+    remember_session_tokens,
 )
 from secretgate.secrets.scanner import SecretScanner
 
@@ -169,6 +172,48 @@ class TestScanBody:
         assert b"eyJhbGciOiJSUzI1NiJ9" in result
         assert b"REDACTED<jwt-token" not in result
         assert alerts == []
+
+    def test_remember_and_get_session_tokens_per_host(self):
+        """Tokens harvested under one host are retrievable later for that host."""
+        clear_session_tokens()
+        try:
+            jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value"
+            body = f'{{"jwt":"{jwt}"}}'.encode()
+            added = remember_session_tokens("api.cloudflare.com", body)
+            assert added == 1
+            assert jwt in get_session_tokens("api.cloudflare.com")
+            # Other hosts must not see the token
+            assert get_session_tokens("api.github.com") == set()
+        finally:
+            clear_session_tokens()
+
+    def test_remember_session_tokens_survives_across_handlers(self, redact_scanner):
+        """Two separate handler instances on the same host share session tokens.
+
+        Simulates wrangler's connection pool: /assets-upload-session and
+        /versions land on different sockets but the same host, and the JWT
+        should still be excluded from request scanning on the second socket.
+        """
+        clear_session_tokens()
+        try:
+            jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value"
+            # Connection 1: harvest the JWT from an upstream response
+            response_body = f'{{"result":{{"jwt":"{jwt}"}}}}'.encode()
+            remember_session_tokens("api.cloudflare.com", response_body)
+
+            # Connection 2 (different handler instance): scan a request body
+            # that echoes the JWT — should NOT redact
+            request_body = f'{{"assets":{{"jwt":"{jwt}","config":{{}}}}}}'.encode()
+            result, alerts = redact_scanner.scan_body(
+                request_body,
+                "application/json",
+                exclude_values=get_session_tokens("api.cloudflare.com"),
+            )
+            assert jwt.encode() in result
+            assert b"REDACTED<jwt-token" not in result
+            assert alerts == []
+        finally:
+            clear_session_tokens()
 
     def test_exclude_values_short_substring_not_suppressed(self, redact_scanner):
         """A short secret that is a substring of the auth token must still be caught.
