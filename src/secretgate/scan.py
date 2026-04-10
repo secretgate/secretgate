@@ -7,6 +7,7 @@ instead of structured JSON messages.
 from __future__ import annotations
 
 import json
+import re
 
 import structlog
 
@@ -15,6 +16,29 @@ from secretgate.secrets.redactor import _make_placeholder
 from secretgate.secrets.scanner import SecretScanner
 
 logger = structlog.get_logger()
+
+# JWT pattern used to extract session tokens from upstream response bodies.
+# Mirrors the JWT Token signature in signatures.yaml.  Used by the forward
+# proxy to track tokens issued by an upstream so they are not redacted when
+# the client sends them back in a subsequent request body (issue #66).
+_JWT_RE = re.compile(rb"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_./+=-]+")
+
+# Bound the per-connection session-token set so a long-lived connection
+# streaming many JWT-shaped values cannot grow memory without limit.
+MAX_SESSION_TOKENS = 64
+
+
+def extract_session_tokens(data: bytes) -> set[str]:
+    """Extract JWT-shaped strings from raw bytes (e.g. an upstream response body).
+
+    Used by the forward proxy to remember session tokens issued by upstream
+    servers so the same tokens are not redacted when the client echoes them
+    back in a follow-up request body.
+    """
+    if not data or b"eyJ" not in data:
+        return set()
+    return {m.group(0).decode("ascii", errors="replace") for m in _JWT_RE.finditer(data)}
+
 
 # Content types that should never be scanned (binary data)
 _SKIP_PREFIXES = ("image/", "audio/", "video/")

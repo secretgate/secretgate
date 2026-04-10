@@ -19,17 +19,17 @@ import h2.exceptions
 import h2.settings
 import structlog
 
-from secretgate.scan import BlockedError, TextScanner
+from secretgate.scan import (
+    MAX_SESSION_TOKENS,
+    BlockedError,
+    TextScanner,
+    extract_session_tokens,
+)
 
 logger = structlog.get_logger()
 
 # Match forward.py's limit
 MAX_BODY_SIZE = 10 * 1024 * 1024  # 10MB
-
-# H2 flow control: default 65,535 bytes is far too small for proxying
-# resource-heavy pages with many concurrent streams. Production proxies
-# (nginx, envoy) use multi-MB windows. 16MB matches Go's default.
-H2_WINDOW_SIZE = 16 * 1024 * 1024  # 16MB
 
 # Auth path pattern — same as forward.py (duplicated to avoid circular import)
 _AUTH_PATH_PATTERNS = re.compile(
@@ -43,6 +43,11 @@ _AUTH_PATH_PATTERNS = re.compile(
     r")",
     re.IGNORECASE,
 )
+
+# H2 flow control: default 65,535 bytes is far too small for proxying
+# resource-heavy pages with many concurrent streams. Production proxies
+# (nginx, envoy) use multi-MB windows. 16MB matches Go's default.
+H2_WINDOW_SIZE = 16 * 1024 * 1024  # 16MB
 
 
 def _print_block_notice(message: str, alerts: list[str], host: str) -> None:
@@ -111,6 +116,9 @@ class H2ConnectionHandler:
         self._upstream_pending: dict[int, tuple[bytes, bool]] = {}
         # Requests queued because upstream MAX_CONCURRENT_STREAMS was reached
         self._queued_requests: list[_QueuedRequest] = []
+        # JWT tokens harvested from upstream response bodies on this connection.
+        # Used as exclusions when scanning subsequent request bodies (issue #66).
+        self._session_tokens: set[str] = set()
 
     @staticmethod
     def _apply_window_settings(conn: h2.connection.H2Connection) -> None:
@@ -444,7 +452,9 @@ class H2ConnectionHandler:
 
         # Extract auth token so we never redact the request's own
         # credential when it also appears in the body (issue #64).
-        exclude_values: set[str] = set()
+        # Also include session tokens previously seen in upstream
+        # responses on this connection (issue #66).
+        exclude_values: set[str] = set(self._session_tokens)
         for n, v in headers:
             if n == "authorization" and v:
                 parts = v.split(None, 1)
@@ -558,6 +568,14 @@ class H2ConnectionHandler:
         # Always acknowledge to keep the connection-level flow control window open,
         # even if the stream was already cleaned up (race with reset/complete).
         self._upstream_conn.acknowledge_received_data(flow_controlled_length, upstream_stream_id)
+
+        # Harvest JWTs the upstream issues so we don't redact them when the
+        # client echoes them back in a follow-up request body (issue #66).
+        if data and len(self._session_tokens) < MAX_SESSION_TOKENS:
+            for tok in extract_session_tokens(data):
+                if len(self._session_tokens) >= MAX_SESSION_TOKENS:
+                    break
+                self._session_tokens.add(tok)
 
         client_stream_id = self._upstream_to_client.get(upstream_stream_id)
         if client_stream_id is None:

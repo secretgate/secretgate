@@ -17,7 +17,12 @@ import structlog
 
 from secretgate.certs import CertAuthority
 from secretgate.h2_handler import H2ConnectionHandler
-from secretgate.scan import BlockedError, TextScanner
+from secretgate.scan import (
+    MAX_SESSION_TOKENS,
+    BlockedError,
+    TextScanner,
+    extract_session_tokens,
+)
 
 logger = structlog.get_logger()
 
@@ -191,11 +196,28 @@ class _ConnectionHandler:
         self._scanner = scanner
         self._passthrough = passthrough_domains
         self._upstream_ssl = upstream_ssl
+        # JWT tokens harvested from upstream response bodies on this connection.
+        # Used as exclusions when scanning subsequent request bodies so that
+        # session tokens issued by the upstream (e.g. Cloudflare's assets-upload
+        # JWT) are not redacted when the client echoes them back (issue #66).
+        self._session_tokens: set[str] = set()
 
     @staticmethod
     def _is_auth_path(path: str) -> bool:
         """Return True if the request path is an auth/token endpoint that should skip scanning."""
         return bool(_AUTH_PATH_PATTERNS.search(path))
+
+    def _record_session_tokens(self, data: bytes) -> None:
+        """Extract JWTs from upstream response data and remember them, bounded."""
+        if len(self._session_tokens) >= MAX_SESSION_TOKENS:
+            return
+        tokens = extract_session_tokens(data)
+        if not tokens:
+            return
+        for tok in tokens:
+            if len(self._session_tokens) >= MAX_SESSION_TOKENS:
+                break
+            self._session_tokens.add(tok)
 
     async def run(self) -> None:
         """Read the initial request and dispatch."""
@@ -527,7 +549,9 @@ class _ConnectionHandler:
 
             # Extract auth token so we never redact the request's own
             # credential when it also appears in the body (issue #64).
-            exclude_values: set[str] = set()
+            # Also include session tokens previously seen in upstream
+            # responses on this connection (issue #66).
+            exclude_values: set[str] = set(self._session_tokens)
             auth_header = req_headers.get("authorization", "")
             if auth_header:
                 # Strip "Bearer " / "Basic " prefix to get the raw token
@@ -692,6 +716,7 @@ class _ConnectionHandler:
             connection = resp_headers.get("connection", "").lower()
 
             if resp_body_start:
+                self._record_session_tokens(resp_body_start)
                 client_writer.write(resp_body_start)
                 await client_writer.drain()
 
@@ -704,6 +729,7 @@ class _ConnectionHandler:
                     chunk = await upstream_reader.read(min(remaining, 65536))
                     if not chunk:
                         return
+                    self._record_session_tokens(chunk)
                     client_writer.write(chunk)
                     await client_writer.drain()
                     sent += len(chunk)
@@ -749,6 +775,7 @@ class _ConnectionHandler:
                     chunk = await upstream_reader.read(65536)
                     if not chunk:
                         return
+                    self._record_session_tokens(chunk)
                     client_writer.write(chunk)
                     await client_writer.drain()
                     resp_conn.receive_data(chunk)
@@ -771,6 +798,7 @@ class _ConnectionHandler:
                         chunk = await upstream_reader.read(65536)
                         if not chunk:
                             break
+                        self._record_session_tokens(chunk)
                         client_writer.write(chunk)
                         await client_writer.drain()
                 except (ConnectionResetError, BrokenPipeError):
@@ -881,6 +909,7 @@ class _ConnectionHandler:
                 chunk = await up_reader.read(65536)
                 if not chunk:
                     break
+                self._record_session_tokens(chunk)
                 self._writer.write(chunk)
                 await self._writer.drain()
         except (ConnectionResetError, BrokenPipeError):

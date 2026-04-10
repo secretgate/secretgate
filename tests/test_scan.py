@@ -13,6 +13,7 @@ from secretgate.scan import (
     _strip_cohere,
     _strip_gemini,
     _strip_messages_format,
+    extract_session_tokens,
 )
 from secretgate.secrets.scanner import SecretScanner
 
@@ -135,6 +136,39 @@ class TestScanBody:
         assert jwt.encode() in result
         assert b"AKIAIOSFODNN7EXAMPLE" not in result
         assert len(alerts) > 0
+
+    def test_extract_session_tokens_finds_jwts_in_json(self):
+        body = (
+            b'{"jwt":"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value",'
+            b'"other":"not-a-jwt"}'
+        )
+        tokens = extract_session_tokens(body)
+        assert "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value" in tokens
+
+    def test_extract_session_tokens_returns_empty_for_clean_body(self):
+        assert extract_session_tokens(b'{"hello":"world"}') == set()
+        assert extract_session_tokens(b"") == set()
+
+    def test_session_token_excluded_from_request_scan(self, redact_scanner):
+        """Simulates the issue #66 flow: a JWT issued by the upstream is
+        echoed back in a follow-up request body and must not be redacted."""
+        # Token harvested from a prior upstream response body
+        upstream_body = b'{"jwt":"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value"}'
+        session_tokens = extract_session_tokens(upstream_body)
+        assert session_tokens
+
+        # Subsequent request echoes the token in its multipart metadata
+        request_body = (
+            b'{"assets":{"jwt":"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value",'
+            b'"config":{}}}'
+        )
+        result, alerts = redact_scanner.scan_body(
+            request_body, "application/json", exclude_values=session_tokens
+        )
+        # JWT survives — secretgate recognizes it as a session token
+        assert b"eyJhbGciOiJSUzI1NiJ9" in result
+        assert b"REDACTED<jwt-token" not in result
+        assert alerts == []
 
     def test_exclude_values_short_substring_not_suppressed(self, redact_scanner):
         """A short secret that is a substring of the auth token must still be caught.
