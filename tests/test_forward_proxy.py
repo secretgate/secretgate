@@ -845,6 +845,121 @@ class TestAuthTokenExclusion:
             server.close()
             await server.wait_closed()
 
+    async def test_session_token_from_chunked_gzip_response(self, ca, proxy_server):
+        """Issue #66: Cloudflare wrangler flow — the JWT arrives in a
+        chunked + gzip response, so the harvester must decode chunked
+        framing and decompress gzip before running the JWT regex."""
+        import gzip
+
+        _, port = proxy_server
+
+        jwt = b"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value"
+
+        async def handle(reader, writer):
+            # Request 1: /assets-upload-session — reply with chunked + gzip
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    return
+                data += chunk
+            plaintext = b'{"result":{"jwt":"' + jwt + b'"},"ok":true}'
+            gzipped = gzip.compress(plaintext)
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Encoding: gzip\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\n"
+            )
+            # Split the gzip stream across two chunks so both the buffering
+            # and the streaming decompressor paths are exercised.
+            mid = len(gzipped) // 2
+            for part in (gzipped[:mid], gzipped[mid:]):
+                writer.write(f"{len(part):x}\r\n".encode() + part + b"\r\n")
+            writer.write(b"0\r\n\r\n")
+            await writer.drain()
+
+            # Request 2: /versions — echo the request body so we can inspect
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    return
+                data += chunk
+            header_end = data.index(b"\r\n\r\n") + 4
+            cl = 0
+            for line in data[:header_end].decode("latin-1").split("\r\n"):
+                if line.lower().startswith("content-length:"):
+                    cl = int(line.split(":", 1)[1].strip())
+                    break
+            body = data[header_end:]
+            while len(body) < cl:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    break
+                body += chunk
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"Connection: close\r\n\r\n" + body
+            )
+            await writer.drain()
+            writer.close()
+
+        ssl_ctx = ca.get_domain_context("127.0.0.1")
+        server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=ssl_ctx)
+        srv_port = server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            connect_req = (
+                f"CONNECT 127.0.0.1:{srv_port} HTTP/1.1\r\nHost: 127.0.0.1:{srv_port}\r\n\r\n"
+            )
+            writer.write(connect_req.encode())
+            await writer.drain()
+            response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 Connection Established" in response
+
+            client_ssl = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            client_ssl.load_verify_locations(str(ca.ca_cert_path))
+            await writer.start_tls(client_ssl, server_hostname="127.0.0.1")
+
+            # Request 1: GET /assets-upload-session
+            writer.write(b"GET /assets-upload-session HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            await writer.drain()
+            resp1 = b""
+            while b"0\r\n\r\n" not in resp1:
+                chunk = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+                if not chunk:
+                    break
+                resp1 += chunk
+
+            # Request 2: POST /versions with the JWT echoed in the body
+            req2_body = b'{"assets":{"jwt":"' + jwt + b'","config":{}}}'
+            req2 = (
+                b"POST /workers/scripts/test/versions HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(req2_body)).encode() + b"\r\n\r\n" + req2_body
+            )
+            writer.write(req2)
+            await writer.drain()
+            resp2 = b""
+            while True:
+                chunk = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+                if not chunk:
+                    break
+                resp2 += chunk
+            # The server echoed what it received — the JWT must be intact
+            assert jwt in resp2, "JWT must survive the /versions body scan"
+            assert b"REDACTED<jwt-token" not in resp2
+
+            writer.close()
+        finally:
+            server.close()
+            await server.wait_closed()
+
 
 class TestErrorResponses:
     async def test_502_when_upstream_drops_connection(self, ca, proxy_server):

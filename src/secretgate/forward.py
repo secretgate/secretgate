@@ -720,15 +720,26 @@ class _ConnectionHandler:
             # Harvester for JWT-shaped session tokens issued by the upstream.
             # Decompresses gzip/deflate before pattern matching so Cloudflare-
             # style gzipped JSON responses are handled correctly (issue #66).
+            #
+            # Important: do NOT feed ``resp_body_start`` here.  For a chunked
+            # response it contains raw chunk-size prefixes that would corrupt
+            # the zlib decompressor's state and permanently disable harvesting
+            # for the rest of the response.  Each framing branch below feeds
+            # the right bytes: fixed-length / read-until-close use raw entity
+            # bytes; the chunked branch uses h11-decoded ``Data.data``.
             harvester = SessionTokenHarvester(host, resp_content_encoding)
 
+            # Relay the body-start bytes to the client unchanged — they were
+            # read as part of the header buffer but belong to the body.
             if resp_body_start:
-                self._harvest(harvester, resp_body_start)
                 client_writer.write(resp_body_start)
                 await client_writer.drain()
 
             if resp_content_length is not None:
-                # Fixed-length body
+                # Fixed-length body: ``resp_body_start`` is pure entity bytes
+                # (possibly gzip-framed), so feed it to the harvester.
+                if resp_body_start:
+                    self._harvest(harvester, resp_body_start)
                 cl = int(resp_content_length)
                 sent = len(resp_body_start)
                 while sent < cl:
@@ -743,10 +754,10 @@ class _ConnectionHandler:
                     sent += len(chunk)
                 self._harvest_flush(harvester)
             elif "chunked" in transfer_encoding:
-                # Use h11 to properly detect end of chunked response stream
-                # AND to extract decoded chunk data for the harvester (the raw
-                # socket bytes contain chunk-size prefixes that would split
-                # JWTs across boundaries and defeat the regex).
+                # Use h11 to both detect end-of-stream AND decode the chunk
+                # framing.  The harvester is fed only decoded ``Data.data``
+                # payloads (pure entity bytes, possibly gzip-framed) — raw
+                # socket bytes are left to the client relay.
                 resp_conn = h11.Connection(our_role=h11.CLIENT)
                 method_str = request_line.split(" ", 1)[0]
                 skip_headers = {"content-length", "transfer-encoding", "content-type"}
@@ -764,22 +775,15 @@ class _ConnectionHandler:
                 )
                 resp_conn.send(h11.EndOfMessage())
 
-                # resp_body_start was already relayed above AND h11 already has
-                # the header data — feed any remaining bytes (which may include
-                # body bytes beyond the header boundary) and drain Data events
-                # into the harvester before entering the read loop.
+                # Feed the full header buffer to h11 — this also seeds it
+                # with any body-start bytes that were read along with the
+                # headers.  Drain any ``Data`` events that are already
+                # available into the harvester before blocking on the socket.
                 resp_conn.receive_data(resp_header_data)
                 resp_done = False
                 while True:
                     ev = resp_conn.next_event()
                     if isinstance(ev, h11.Data):
-                        # Decoded chunk contents — note resp_body_start raw
-                        # bytes were also fed above via _harvest, which is a
-                        # no-op when the harvester is chunked-aware; but for
-                        # non-chunked resp_body_start it is the right data.
-                        # For chunked encoding, the raw resp_body_start will
-                        # contain chunk-size prefixes, so re-feed the decoded
-                        # Data payload here for reliable matching.
                         self._harvest(harvester, ev.data)
                         continue
                     elif isinstance(ev, (h11.Response, h11.InformationalResponse)):
@@ -815,7 +819,10 @@ class _ConnectionHandler:
                             break
                 self._harvest_flush(harvester)
             else:
-                # No content-length, no chunked — read until connection close
+                # No content-length, no chunked — read until connection close.
+                # ``resp_body_start`` is pure entity bytes here, so feed it.
+                if resp_body_start:
+                    self._harvest(harvester, resp_body_start)
                 try:
                     while True:
                         chunk = await upstream_reader.read(65536)
