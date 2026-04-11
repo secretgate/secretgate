@@ -18,7 +18,12 @@ import structlog
 from secretgate.certs import CertAuthority
 from secretgate.h2_handler import H2ConnectionHandler
 from secretgate.patterns import is_auth_path
-from secretgate.scan import BlockedError, TextScanner
+from secretgate.scan import (
+    BlockedError,
+    SessionTokenHarvester,
+    TextScanner,
+    get_session_tokens,
+)
 
 logger = structlog.get_logger()
 
@@ -182,6 +187,22 @@ class _ConnectionHandler:
     def _is_auth_path(path: str) -> bool:
         """Return True if the request path is an auth/token endpoint that should skip scanning."""
         return is_auth_path(path)
+
+    @staticmethod
+    def _harvest(harvester: SessionTokenHarvester, data: bytes) -> None:
+        """Feed response body data to the session-token harvester.
+
+        The harvester buffers decompressed data and scans on ``close()``
+        so JWTs spanning chunk boundaries are caught reliably.
+        """
+        harvester.feed(data)
+
+    @staticmethod
+    def _harvest_flush(harvester: SessionTokenHarvester) -> None:
+        """Flush the harvester at end-of-response and emit a diagnostic log."""
+        added = harvester.close()
+        if added:
+            logger.info("session_token_harvested", host=harvester._host, count=added)
 
     async def run(self) -> None:
         """Read the initial request and dispatch."""
@@ -394,6 +415,53 @@ class _ConnectionHandler:
                 await self._send_error(client_writer, 400, "Bad Request", "Malformed HTTP request")
                 return
 
+            # Detect WebSocket upgrade — pass through as raw bidirectional pipe
+            # (WebSocket frame content is not scanned — documented limitation)
+            if (
+                req_headers.get("upgrade", "").lower() == "websocket"
+                and "upgrade" in req_headers.get("connection", "").lower()
+            ):
+                logger.warning(
+                    "websocket_upgrade_detected",
+                    host=host,
+                    note="frames bypass secret scanning",
+                )
+                # Forward only the headers (not any trailing bytes) to upstream
+                upstream_writer.write(headers_bytes + body_start)
+                await upstream_writer.drain()
+
+                # Read upstream response and validate 101 before piping
+                resp_data = b""
+                while b"\r\n\r\n" not in resp_data:
+                    chunk = await upstream_reader.read(8192)
+                    if not chunk:
+                        await self._send_error(
+                            client_writer,
+                            502,
+                            "Bad Gateway",
+                            "Upstream closed before completing WebSocket handshake",
+                        )
+                        return
+                    resp_data += chunk
+
+                # Check for 101 Switching Protocols
+                resp_line = resp_data.split(b"\r\n", 1)[0].decode("latin-1", errors="replace")
+                if "101" not in resp_line:
+                    # Not a WebSocket upgrade — forward the error response to client
+                    client_writer.write(resp_data)
+                    await client_writer.drain()
+                    return
+
+                # Forward 101 response to client, then raw bidirectional pipe
+                client_writer.write(resp_data)
+                await client_writer.drain()
+                await asyncio.gather(
+                    self._pipe(upstream_reader, client_writer),
+                    self._pipe(client_reader, upstream_writer),
+                    return_exceptions=True,
+                )
+                return
+
             # Read the request body
             content_length_str = req_headers.get("content-length")
             req_transfer = req_headers.get("transfer-encoding", "").lower()
@@ -463,9 +531,25 @@ class _ConnectionHandler:
             skip_scan = self._is_auth_path(req_path)
             if skip_scan:
                 logger.debug("forward_skip_auth_path", host=host, path=req_path)
+
+            # Extract auth token so we never redact the request's own
+            # credential when it also appears in the body (issue #64).
+            # Also include session tokens previously seen in upstream
+            # responses to the same host (issue #66).
+            exclude_values: set[str] = get_session_tokens(host)
+            if exclude_values:
+                logger.info("session_tokens_loaded", host=host, count=len(exclude_values))
+            auth_header = req_headers.get("authorization", "")
+            if auth_header:
+                # Strip "Bearer " / "Basic " prefix to get the raw token
+                parts = auth_header.split(None, 1)
+                exclude_values.add(parts[-1] if parts else auth_header)
+
             if body and content_length > 0 and not skip_scan:
                 try:
-                    scanned_body, alerts = self._scanner.scan_body(body, content_type)
+                    scanned_body, alerts = self._scanner.scan_body(
+                        body, content_type, exclude_values=exclude_values
+                    )
                     for alert in alerts:
                         logger.warning("forward_proxy_alert", host=host, alert=alert)
                 except BlockedError as exc:
@@ -617,31 +701,51 @@ class _ConnectionHandler:
             transfer_encoding = resp_headers.get("transfer-encoding", "").lower()
             resp_content_length = resp_headers.get("content-length")
             connection = resp_headers.get("connection", "").lower()
+            resp_content_encoding = resp_headers.get("content-encoding", "")
 
+            # Harvester for JWT-shaped session tokens issued by the upstream.
+            # Decompresses gzip/deflate before pattern matching so Cloudflare-
+            # style gzipped JSON responses are handled correctly (issue #66).
+            #
+            # Important: do NOT feed ``resp_body_start`` here.  For a chunked
+            # response it contains raw chunk-size prefixes that would corrupt
+            # the zlib decompressor's state and permanently disable harvesting
+            # for the rest of the response.  Each framing branch below feeds
+            # the right bytes: fixed-length / read-until-close use raw entity
+            # bytes; the chunked branch uses h11-decoded ``Data.data``.
+            harvester = SessionTokenHarvester(host, resp_content_encoding)
+
+            # Relay the body-start bytes to the client unchanged — they were
+            # read as part of the header buffer but belong to the body.
             if resp_body_start:
                 client_writer.write(resp_body_start)
                 await client_writer.drain()
 
             if resp_content_length is not None:
-                # Fixed-length body
+                # Fixed-length body: ``resp_body_start`` is pure entity bytes
+                # (possibly gzip-framed), so feed it to the harvester.
+                if resp_body_start:
+                    self._harvest(harvester, resp_body_start)
                 cl = int(resp_content_length)
                 sent = len(resp_body_start)
                 while sent < cl:
                     remaining = cl - sent
                     chunk = await upstream_reader.read(min(remaining, 65536))
                     if not chunk:
+                        self._harvest_flush(harvester)
                         return
+                    self._harvest(harvester, chunk)
                     client_writer.write(chunk)
                     await client_writer.drain()
                     sent += len(chunk)
+                self._harvest_flush(harvester)
             elif "chunked" in transfer_encoding:
-                # Use h11 to properly detect end of chunked response stream.
-                # h11 tracks chunk framing and emits EndOfMessage at the terminal chunk.
+                # Use h11 to both detect end-of-stream AND decode the chunk
+                # framing.  The harvester is fed only decoded ``Data.data``
+                # payloads (pure entity bytes, possibly gzip-framed) — raw
+                # socket bytes are left to the client relay.
                 resp_conn = h11.Connection(our_role=h11.CLIENT)
-                # Put h11 in the correct state by telling it we "sent" a request
                 method_str = request_line.split(" ", 1)[0]
-                # Only include headers h11 needs for response parsing (host).
-                # Exclude body-framing headers so h11 doesn't expect request body data.
                 skip_headers = {"content-length", "transfer-encoding", "content-type"}
                 h11_headers = [
                     (k.encode("latin-1"), v.encode("latin-1"))
@@ -657,12 +761,18 @@ class _ConnectionHandler:
                 )
                 resp_conn.send(h11.EndOfMessage())
 
-                # Feed the response data we already have (headers + any body start)
+                # Feed the full header buffer to h11 — this also seeds it
+                # with any body-start bytes that were read along with the
+                # headers.  Drain any ``Data`` events that are already
+                # available into the harvester before blocking on the socket.
                 resp_conn.receive_data(resp_header_data)
                 resp_done = False
                 while True:
                     ev = resp_conn.next_event()
-                    if isinstance(ev, (h11.Response, h11.InformationalResponse, h11.Data)):
+                    if isinstance(ev, h11.Data):
+                        self._harvest(harvester, ev.data)
+                        continue
+                    elif isinstance(ev, (h11.Response, h11.InformationalResponse)):
                         continue
                     elif isinstance(ev, h11.EndOfMessage):
                         resp_done = True
@@ -675,6 +785,7 @@ class _ConnectionHandler:
                 while not resp_done:
                     chunk = await upstream_reader.read(65536)
                     if not chunk:
+                        self._harvest_flush(harvester)
                         return
                     client_writer.write(chunk)
                     await client_writer.drain()
@@ -682,6 +793,7 @@ class _ConnectionHandler:
                     while True:
                         ev = resp_conn.next_event()
                         if isinstance(ev, h11.Data):
+                            self._harvest(harvester, ev.data)
                             continue
                         elif isinstance(ev, h11.EndOfMessage):
                             resp_done = True
@@ -691,17 +803,23 @@ class _ConnectionHandler:
                         else:
                             resp_done = True
                             break
+                self._harvest_flush(harvester)
             else:
-                # No content-length, no chunked — read until connection close
+                # No content-length, no chunked — read until connection close.
+                # ``resp_body_start`` is pure entity bytes here, so feed it.
+                if resp_body_start:
+                    self._harvest(harvester, resp_body_start)
                 try:
                     while True:
                         chunk = await upstream_reader.read(65536)
                         if not chunk:
                             break
+                        self._harvest(harvester, chunk)
                         client_writer.write(chunk)
                         await client_writer.drain()
                 except (ConnectionResetError, BrokenPipeError):
                     pass
+                self._harvest_flush(harvester)
                 return  # connection is done
 
             if connection == "close":
@@ -767,7 +885,9 @@ class _ConnectionHandler:
             logger.debug("forward_skip_auth_path", host=host, path=req_path)
         if body and content_length > 0 and not skip_scan:
             try:
-                scanned_body, alerts = self._scanner.scan_body(body, content_type)
+                scanned_body, alerts = self._scanner.scan_body(
+                    body, content_type, exclude_values=get_session_tokens(host)
+                )
                 for alert in alerts:
                     logger.warning("forward_proxy_alert", host=host, alert=alert)
             except BlockedError as exc:
@@ -802,15 +922,23 @@ class _ConnectionHandler:
         up_writer.write(modified_headers + scanned_body)
         await up_writer.drain()
 
-        # Relay response back
+        # Relay response back.  Plain-HTTP forward proxy mode does not parse
+        # response headers so we don't know the Content-Encoding; create a
+        # passthrough harvester so uncompressed bodies still contribute to
+        # the per-host session-token store.  Gzipped plain-HTTP responses
+        # will be a no-op here, which is acceptable because plain HTTP is
+        # not the hot path for the issue #66 wrangler flow.
+        harvester = SessionTokenHarvester(host)
         try:
             while True:
                 chunk = await up_reader.read(65536)
                 if not chunk:
                     break
+                self._harvest(harvester, chunk)
                 self._writer.write(chunk)
                 await self._writer.drain()
         except (ConnectionResetError, BrokenPipeError):
             pass
         finally:
+            self._harvest_flush(harvester)
             up_writer.close()

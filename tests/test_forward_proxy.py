@@ -639,6 +639,328 @@ class TestAuthPathSkip:
             await echo_server.wait_closed()
 
 
+class TestAuthTokenExclusion:
+    """Auth tokens in the request body should not be redacted when they match the Authorization header."""
+
+    async def test_jwt_in_body_not_redacted_when_in_auth_header(self, ca, proxy_server):
+        """A JWT that is both in the Authorization header and the body should not be redacted (issue #64)."""
+        _, port = proxy_server
+
+        echo_server = await _run_echo_https_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+
+            connect_req = (
+                f"CONNECT 127.0.0.1:{echo_port} HTTP/1.1\r\nHost: 127.0.0.1:{echo_port}\r\n\r\n"
+            )
+            writer.write(connect_req.encode())
+            await writer.drain()
+
+            response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 Connection Established" in response
+
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx.load_verify_locations(str(ca.ca_cert_path))
+            await writer.start_tls(ssl_ctx, server_hostname="127.0.0.1")
+
+            # Simulate wrangler deploy: JWT in both the Authorization header and the
+            # multipart body metadata.
+            jwt = b"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.sig_value_here"
+            body = b'{"metadata":{"token":"' + jwt + b'"}}'
+            inner_request = (
+                b"POST /workers/scripts/bugdrop/versions HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Authorization: Bearer " + jwt + b"\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"\r\n" + body
+            )
+            writer.write(inner_request)
+            await writer.drain()
+
+            inner_response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 OK" in inner_response
+            # The JWT should NOT be redacted — it's the request's own auth token
+            assert jwt in inner_response
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
+
+    async def test_other_secrets_still_redacted_with_auth_header(self, ca, proxy_server):
+        """Unrelated secrets in the body should still be redacted even when an auth header is present."""
+        _, port = proxy_server
+
+        echo_server = await _run_echo_https_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+
+            connect_req = (
+                f"CONNECT 127.0.0.1:{echo_port} HTTP/1.1\r\nHost: 127.0.0.1:{echo_port}\r\n\r\n"
+            )
+            writer.write(connect_req.encode())
+            await writer.drain()
+
+            response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 Connection Established" in response
+
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx.load_verify_locations(str(ca.ca_cert_path))
+            await writer.start_tls(ssl_ctx, server_hostname="127.0.0.1")
+
+            jwt = b"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.sig_value_here"
+            body = b"leaked_key=AKIAIOSFODNN7EXAMPLE"
+            inner_request = (
+                b"POST /v1/deploy HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Authorization: Bearer " + jwt + b"\r\n"
+                b"Content-Type: application/x-www-form-urlencoded\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"\r\n" + body
+            )
+            writer.write(inner_request)
+            await writer.drain()
+
+            inner_response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 OK" in inner_response
+            # AWS key should still be redacted
+            assert b"AKIAIOSFODNN7EXAMPLE" not in inner_response
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
+
+    async def test_session_token_from_response_excluded_from_next_request(self, ca, proxy_server):
+        """Issue #66: a JWT issued in an upstream response must not be redacted
+        when the client echoes it back in a follow-up request body."""
+        _, port = proxy_server
+
+        jwt = b"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value"
+
+        async def handle(reader, writer):
+            # Request 1: respond with a JSON body containing the JWT
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    return
+                data += chunk
+            resp1_body = b'{"jwt":"' + jwt + b'","ok":true}'
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(resp1_body)).encode() + b"\r\n"
+                b"\r\n" + resp1_body
+            )
+            await writer.drain()
+
+            # Request 2: echo the request body so we can inspect what arrived
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    return
+                data += chunk
+            header_end = data.index(b"\r\n\r\n") + 4
+            cl = 0
+            for line in data[:header_end].decode("latin-1").split("\r\n"):
+                if line.lower().startswith("content-length:"):
+                    cl = int(line.split(":", 1)[1].strip())
+                    break
+            body = data[header_end:]
+            while len(body) < cl:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    break
+                body += chunk
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"Connection: close\r\n"
+                b"\r\n" + body
+            )
+            await writer.drain()
+            writer.close()
+
+        ssl_ctx = ca.get_domain_context("127.0.0.1")
+        server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=ssl_ctx)
+        srv_port = server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            connect_req = (
+                f"CONNECT 127.0.0.1:{srv_port} HTTP/1.1\r\nHost: 127.0.0.1:{srv_port}\r\n\r\n"
+            )
+            writer.write(connect_req.encode())
+            await writer.drain()
+            response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 Connection Established" in response
+
+            client_ssl = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            client_ssl.load_verify_locations(str(ca.ca_cert_path))
+            await writer.start_tls(client_ssl, server_hostname="127.0.0.1")
+
+            # Request 1: GET — response carries the JWT
+            req1 = b"GET /assets-upload-session HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+            writer.write(req1)
+            await writer.drain()
+            resp1 = b""
+            while b'"ok":true}' not in resp1:
+                chunk = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+                if not chunk:
+                    break
+                resp1 += chunk
+            assert jwt in resp1, "JWT should pass through unscanned in response"
+
+            # Request 2: POST with the JWT in the body — must NOT be redacted
+            req2_body = b'{"assets":{"jwt":"' + jwt + b'","config":{}}}'
+            req2 = (
+                b"POST /workers/scripts/test/versions HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(req2_body)).encode() + b"\r\n"
+                b"\r\n" + req2_body
+            )
+            writer.write(req2)
+            await writer.drain()
+            resp2 = b""
+            while True:
+                chunk = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+                if not chunk:
+                    break
+                resp2 += chunk
+            # The echoed request body should contain the original JWT, not a placeholder
+            assert jwt in resp2, "JWT should be excluded from request scan after seen in response"
+            assert b"REDACTED<jwt-token" not in resp2
+
+            writer.close()
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_session_token_from_chunked_gzip_response(self, ca, proxy_server):
+        """Issue #66: Cloudflare wrangler flow — the JWT arrives in a
+        chunked + gzip response, so the harvester must decode chunked
+        framing and decompress gzip before running the JWT regex."""
+        import gzip
+
+        _, port = proxy_server
+
+        jwt = b"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value"
+
+        async def handle(reader, writer):
+            # Request 1: /assets-upload-session — reply with chunked + gzip
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    return
+                data += chunk
+            plaintext = b'{"result":{"jwt":"' + jwt + b'"},"ok":true}'
+            gzipped = gzip.compress(plaintext)
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Encoding: gzip\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\n"
+            )
+            # Split the gzip stream across two chunks so both the buffering
+            # and the streaming decompressor paths are exercised.
+            mid = len(gzipped) // 2
+            for part in (gzipped[:mid], gzipped[mid:]):
+                writer.write(f"{len(part):x}\r\n".encode() + part + b"\r\n")
+            writer.write(b"0\r\n\r\n")
+            await writer.drain()
+
+            # Request 2: /versions — echo the request body so we can inspect
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    return
+                data += chunk
+            header_end = data.index(b"\r\n\r\n") + 4
+            cl = 0
+            for line in data[:header_end].decode("latin-1").split("\r\n"):
+                if line.lower().startswith("content-length:"):
+                    cl = int(line.split(":", 1)[1].strip())
+                    break
+            body = data[header_end:]
+            while len(body) < cl:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    break
+                body += chunk
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"Connection: close\r\n\r\n" + body
+            )
+            await writer.drain()
+            writer.close()
+
+        ssl_ctx = ca.get_domain_context("127.0.0.1")
+        server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=ssl_ctx)
+        srv_port = server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            connect_req = (
+                f"CONNECT 127.0.0.1:{srv_port} HTTP/1.1\r\nHost: 127.0.0.1:{srv_port}\r\n\r\n"
+            )
+            writer.write(connect_req.encode())
+            await writer.drain()
+            response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 Connection Established" in response
+
+            client_ssl = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            client_ssl.load_verify_locations(str(ca.ca_cert_path))
+            await writer.start_tls(client_ssl, server_hostname="127.0.0.1")
+
+            # Request 1: GET /assets-upload-session
+            writer.write(b"GET /assets-upload-session HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            await writer.drain()
+            resp1 = b""
+            while b"0\r\n\r\n" not in resp1:
+                chunk = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+                if not chunk:
+                    break
+                resp1 += chunk
+
+            # Request 2: POST /versions with the JWT echoed in the body
+            req2_body = b'{"assets":{"jwt":"' + jwt + b'","config":{}}}'
+            req2 = (
+                b"POST /workers/scripts/test/versions HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(req2_body)).encode() + b"\r\n\r\n" + req2_body
+            )
+            writer.write(req2)
+            await writer.drain()
+            resp2 = b""
+            while True:
+                chunk = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+                if not chunk:
+                    break
+                resp2 += chunk
+            # The server echoed what it received — the JWT must be intact
+            assert jwt in resp2, "JWT must survive the /versions body scan"
+            assert b"REDACTED<jwt-token" not in resp2
+
+            writer.close()
+        finally:
+            server.close()
+            await server.wait_closed()
+
+
 class TestErrorResponses:
     async def test_502_when_upstream_drops_connection(self, ca, proxy_server):
         """Proxy should send 502 instead of EOF when upstream drops the connection."""
@@ -1103,3 +1425,368 @@ class TestH2Tunnel:
         finally:
             echo_server.close()
             await echo_server.wait_closed()
+
+    async def test_h2_large_response_flow_control(self, ca, proxy_server):
+        """Large responses exceeding the H2 flow control window must arrive intact."""
+        _, port = proxy_server
+
+        # 200KB response — well over the default 64KB H2 window
+        echo_server, expected_body = await _run_h2_large_response_server(ca, 200_000)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer, h2_conn = await _h2_connect_and_upgrade(ca, port, echo_port)
+
+            headers = [
+                (":method", "GET"),
+                (":path", "/large"),
+                (":scheme", "https"),
+                (":authority", "127.0.0.1"),
+            ]
+            stream_id = await _h2_send_request(h2_conn, writer, headers)
+
+            status, _, body = await _h2_read_response(
+                reader, h2_conn, writer, stream_id, timeout=15.0
+            )
+            assert status == 200
+            assert len(body) == len(expected_body)
+            assert body == expected_body
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
+
+
+async def _run_h2_large_response_server(
+    ca: CertAuthority, response_size: int, host: str = "127.0.0.1"
+):
+    """H2 server that returns a large response body, handling flow control properly."""
+    ssl_ctx = ca.get_domain_context(host)
+    # Generate deterministic response data
+    pattern = b"ABCDEFGHIJKLMNOP"  # 16 bytes
+    response_body = (pattern * (response_size // len(pattern) + 1))[:response_size]
+
+    async def handle(reader, writer):
+        config = h2.config.H2Configuration(client_side=False)
+        conn = h2.connection.H2Connection(config=config)
+        conn.initiate_connection()
+        writer.write(conn.data_to_send())
+        await writer.drain()
+
+        pending: dict[int, tuple[bytes, int]] = {}  # stream_id -> (remaining_data, offset)
+
+        try:
+            while True:
+                data = await reader.read(65536)
+                if not data:
+                    break
+
+                events = conn.receive_data(data)
+                for event in events:
+                    if isinstance(event, h2.events.RequestReceived):
+                        pass  # wait for stream end
+
+                    elif isinstance(event, h2.events.DataReceived):
+                        conn.acknowledge_received_data(
+                            event.flow_controlled_length, event.stream_id
+                        )
+
+                    elif isinstance(event, h2.events.StreamEnded):
+                        resp_headers = [
+                            (":status", "200"),
+                            ("content-type", "application/octet-stream"),
+                            ("content-length", str(len(response_body))),
+                        ]
+                        conn.send_headers(event.stream_id, resp_headers)
+                        # Send as much as flow control allows
+                        offset = 0
+                        while offset < len(response_body):
+                            window = conn.local_flow_control_window(event.stream_id)
+                            if window <= 0:
+                                pending[event.stream_id] = (response_body, offset)
+                                break
+                            chunk_size = min(
+                                window, conn.max_outbound_frame_size, len(response_body) - offset
+                            )
+                            is_last = offset + chunk_size >= len(response_body)
+                            conn.send_data(
+                                event.stream_id,
+                                response_body[offset : offset + chunk_size],
+                                end_stream=is_last,
+                            )
+                            offset += chunk_size
+                        else:
+                            pending.pop(event.stream_id, None)
+
+                    elif isinstance(event, h2.events.WindowUpdated):
+                        sid = event.stream_id
+                        targets = list(pending.keys()) if sid == 0 else [sid]
+                        for s in targets:
+                            if s not in pending:
+                                continue
+                            body_data, off = pending[s]
+                            while off < len(body_data):
+                                w = conn.local_flow_control_window(s)
+                                if w <= 0:
+                                    break
+                                cs = min(w, conn.max_outbound_frame_size, len(body_data) - off)
+                                is_last = off + cs >= len(body_data)
+                                conn.send_data(s, body_data[off : off + cs], end_stream=is_last)
+                                off += cs
+                            if off >= len(body_data):
+                                del pending[s]
+                            else:
+                                pending[s] = (body_data, off)
+
+                    elif isinstance(event, h2.events.ConnectionTerminated):
+                        writer.write(conn.data_to_send())
+                        await writer.drain()
+                        return
+
+                writer.write(conn.data_to_send())
+                await writer.drain()
+        except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            if not writer.is_closing():
+                writer.close()
+
+    server = await asyncio.start_server(handle, host, 0, ssl=ssl_ctx)
+    return server, response_body
+
+
+async def _run_websocket_echo_server(ca: CertAuthority, host: str = "127.0.0.1"):
+    """HTTPS server that accepts WebSocket upgrades and echoes one message back."""
+    ssl_ctx = ca.get_domain_context(host)
+
+    async def handle(reader, writer):
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = await reader.read(4096)
+            if not chunk:
+                writer.close()
+                return
+            data += chunk
+
+        headers_text = data.split(b"\r\n\r\n")[0].decode("latin-1")
+        headers = {}
+        for line in headers_text.split("\r\n")[1:]:
+            if ":" in line:
+                k, v = line.split(":", 1)
+                headers[k.strip().lower()] = v.strip()
+
+        if headers.get("upgrade", "").lower() != "websocket":
+            writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+            await writer.drain()
+            writer.close()
+            return
+
+        # Send 101 Switching Protocols
+        import hashlib
+        import base64
+
+        ws_key = headers.get("sec-websocket-key", "")
+        accept = base64.b64encode(
+            hashlib.sha1((ws_key + "258EAFA5-E914-47DA-95CA-5AB5DC85B175").encode()).digest()
+        ).decode()
+        response = (
+            f"HTTP/1.1 101 Switching Protocols\r\n"
+            f"Upgrade: websocket\r\n"
+            f"Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Accept: {accept}\r\n"
+            f"\r\n"
+        ).encode()
+        writer.write(response)
+        await writer.drain()
+
+        # Read one WebSocket frame and echo it back
+        # Minimal frame parsing: client frames are masked (RFC 6455)
+        try:
+            frame_header = await asyncio.wait_for(reader.read(2), timeout=5.0)
+            if len(frame_header) < 2:
+                writer.close()
+                return
+            payload_len = frame_header[1] & 0x7F
+            is_masked = bool(frame_header[1] & 0x80)
+            if payload_len == 126:
+                ext = await reader.read(2)
+                payload_len = int.from_bytes(ext, "big")
+            elif payload_len == 127:
+                ext = await reader.read(8)
+                payload_len = int.from_bytes(ext, "big")
+
+            mask_key = b""
+            if is_masked:
+                mask_key = await reader.read(4)
+
+            payload = await reader.read(payload_len)
+            if is_masked:
+                payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+
+            # Send unmasked text frame back
+            resp_frame = bytes([0x81, len(payload)]) + payload
+            writer.write(resp_frame)
+            await writer.drain()
+        except Exception:
+            pass
+        writer.close()
+
+    server = await asyncio.start_server(handle, host, 0, ssl=ssl_ctx)
+    return server
+
+
+async def _run_rejecting_upgrade_server(ca: CertAuthority, host: str = "127.0.0.1"):
+    """HTTPS server that rejects WebSocket upgrades with 403."""
+    ssl_ctx = ca.get_domain_context(host)
+
+    async def handle(reader, writer):
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = await reader.read(4096)
+            if not chunk:
+                writer.close()
+                return
+            data += chunk
+        body = b"WebSocket not allowed"
+        response = (
+            b"HTTP/1.1 403 Forbidden\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+            b"Connection: close\r\n"
+            b"\r\n" + body
+        )
+        writer.write(response)
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(handle, host, 0, ssl=ssl_ctx)
+    return server
+
+
+class TestWebSocketPassthrough:
+    """WebSocket upgrade requests should be detected and passed through."""
+
+    async def _connect_and_tls(self, ca, port, echo_port):
+        """Helper: CONNECT to proxy, TLS handshake, return (reader, writer)."""
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        connect_req = (
+            f"CONNECT 127.0.0.1:{echo_port} HTTP/1.1\r\nHost: 127.0.0.1:{echo_port}\r\n\r\n"
+        )
+        writer.write(connect_req.encode())
+        await writer.drain()
+        response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+        assert b"200 Connection Established" in response
+
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ssl_ctx.load_verify_locations(str(ca.ca_cert_path))
+        await writer.start_tls(ssl_ctx, server_hostname="127.0.0.1")
+        return reader, writer
+
+    async def test_websocket_upgrade_passthrough(self, ca, proxy_server):
+        """WebSocket upgrade should be forwarded and bidirectional pipe established."""
+        _, port = proxy_server
+
+        echo_server = await _run_websocket_echo_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await self._connect_and_tls(ca, port, echo_port)
+
+            # Send WebSocket upgrade request
+            upgrade_req = (
+                b"GET /ws HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Upgrade: websocket\r\n"
+                b"Connection: Upgrade\r\n"
+                b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                b"Sec-WebSocket-Version: 13\r\n"
+                b"\r\n"
+            )
+            writer.write(upgrade_req)
+            await writer.drain()
+
+            # Should receive 101 Switching Protocols
+            resp = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"101 Switching Protocols" in resp
+            assert b"Upgrade: websocket" in resp
+
+            # Send a masked WebSocket text frame
+            payload = b"hello websocket"
+            mask_key = b"\x01\x02\x03\x04"
+            masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+            frame = bytes([0x81, 0x80 | len(payload)]) + mask_key + masked
+            writer.write(frame)
+            await writer.drain()
+
+            # Read echoed frame (unmasked from server)
+            echo_frame = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert len(echo_frame) >= 2
+            echo_payload_len = echo_frame[1] & 0x7F
+            echo_payload = echo_frame[2 : 2 + echo_payload_len]
+            assert echo_payload == b"hello websocket"
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
+
+    async def test_non_websocket_request_still_scanned(self, ca, proxy_server):
+        """Regular POST requests should still go through scanning, not the WebSocket path."""
+        _, port = proxy_server
+
+        echo_server = await _run_echo_https_server(ca)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await self._connect_and_tls(ca, port, echo_port)
+
+            body = b"secret=AKIAIOSFODNN7EXAMPLE"
+            inner_request = (
+                b"POST /test HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: text/plain\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"\r\n" + body
+            )
+            writer.write(inner_request)
+            await writer.drain()
+
+            inner_response = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"200 OK" in inner_response
+            assert b"AKIAIOSFODNN7EXAMPLE" not in inner_response
+
+            writer.close()
+        finally:
+            echo_server.close()
+            await echo_server.wait_closed()
+
+    async def test_websocket_upgrade_rejected_by_upstream(self, ca, proxy_server):
+        """If upstream rejects the upgrade (non-101), the error should be forwarded to client."""
+        _, port = proxy_server
+
+        reject_server = await _run_rejecting_upgrade_server(ca)
+        reject_port = reject_server.sockets[0].getsockname()[1]
+
+        try:
+            reader, writer = await self._connect_and_tls(ca, port, reject_port)
+
+            upgrade_req = (
+                b"GET /ws HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Upgrade: websocket\r\n"
+                b"Connection: Upgrade\r\n"
+                b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                b"Sec-WebSocket-Version: 13\r\n"
+                b"\r\n"
+            )
+            writer.write(upgrade_req)
+            await writer.drain()
+
+            resp = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+            assert b"403 Forbidden" in resp
+            assert b"WebSocket not allowed" in resp
+
+            writer.close()
+        finally:
+            reject_server.close()
+            await reject_server.wait_closed()
