@@ -8,11 +8,16 @@ import pytest
 
 from secretgate.scan import (
     BlockedError,
+    SessionTokenHarvester,
     TextScanner,
     _blank_gemini_part,
     _strip_cohere,
     _strip_gemini,
     _strip_messages_format,
+    clear_session_tokens,
+    extract_session_tokens,
+    get_session_tokens,
+    remember_session_tokens,
 )
 from secretgate.secrets.scanner import SecretScanner
 
@@ -135,6 +140,152 @@ class TestScanBody:
         assert jwt.encode() in result
         assert b"AKIAIOSFODNN7EXAMPLE" not in result
         assert len(alerts) > 0
+
+    def test_extract_session_tokens_finds_jwts_in_json(self):
+        body = (
+            b'{"jwt":"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value",'
+            b'"other":"not-a-jwt"}'
+        )
+        tokens = extract_session_tokens(body)
+        assert "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value" in tokens
+
+    def test_extract_session_tokens_returns_empty_for_clean_body(self):
+        assert extract_session_tokens(b'{"hello":"world"}') == set()
+        assert extract_session_tokens(b"") == set()
+
+    def test_session_token_excluded_from_request_scan(self, redact_scanner):
+        """Simulates the issue #66 flow: a JWT issued by the upstream is
+        echoed back in a follow-up request body and must not be redacted."""
+        # Token harvested from a prior upstream response body
+        upstream_body = b'{"jwt":"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value"}'
+        session_tokens = extract_session_tokens(upstream_body)
+        assert session_tokens
+
+        # Subsequent request echoes the token in its multipart metadata
+        request_body = (
+            b'{"assets":{"jwt":"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value",'
+            b'"config":{}}}'
+        )
+        result, alerts = redact_scanner.scan_body(
+            request_body, "application/json", exclude_values=session_tokens
+        )
+        # JWT survives — secretgate recognizes it as a session token
+        assert b"eyJhbGciOiJSUzI1NiJ9" in result
+        assert b"REDACTED<jwt-token" not in result
+        assert alerts == []
+
+    def test_remember_and_get_session_tokens_per_host(self):
+        """Tokens harvested under one host are retrievable later for that host."""
+        clear_session_tokens()
+        try:
+            jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value"
+            body = f'{{"jwt":"{jwt}"}}'.encode()
+            added = remember_session_tokens("api.cloudflare.com", body)
+            assert added == 1
+            assert jwt in get_session_tokens("api.cloudflare.com")
+            # Other hosts must not see the token
+            assert get_session_tokens("api.github.com") == set()
+        finally:
+            clear_session_tokens()
+
+    def test_remember_session_tokens_survives_across_handlers(self, redact_scanner):
+        """Two separate handler instances on the same host share session tokens.
+
+        Simulates wrangler's connection pool: /assets-upload-session and
+        /versions land on different sockets but the same host, and the JWT
+        should still be excluded from request scanning on the second socket.
+        """
+        clear_session_tokens()
+        try:
+            jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value"
+            # Connection 1: harvest the JWT from an upstream response
+            response_body = f'{{"result":{{"jwt":"{jwt}"}}}}'.encode()
+            remember_session_tokens("api.cloudflare.com", response_body)
+
+            # Connection 2 (different handler instance): scan a request body
+            # that echoes the JWT — should NOT redact
+            request_body = f'{{"assets":{{"jwt":"{jwt}","config":{{}}}}}}'.encode()
+            result, alerts = redact_scanner.scan_body(
+                request_body,
+                "application/json",
+                exclude_values=get_session_tokens("api.cloudflare.com"),
+            )
+            assert jwt.encode() in result
+            assert b"REDACTED<jwt-token" not in result
+            assert alerts == []
+        finally:
+            clear_session_tokens()
+
+    def test_harvester_gzip_decompresses_before_matching(self):
+        """Issue #66: Cloudflare returns gzip — harvester must decompress."""
+        import gzip
+
+        clear_session_tokens()
+        try:
+            jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value"
+            plaintext = f'{{"result":{{"jwt":"{jwt}"}}}}'.encode()
+            gzipped = gzip.compress(plaintext)
+            # Sanity: the regex must not match the gzipped bytes directly
+            assert extract_session_tokens(gzipped) == set()
+
+            h = SessionTokenHarvester("api.cloudflare.com", "gzip")
+            h.feed(gzipped)
+            added = h.close()
+            assert added == 1
+            assert jwt in get_session_tokens("api.cloudflare.com")
+        finally:
+            clear_session_tokens()
+
+    def test_harvester_gzip_streaming_multi_chunk(self):
+        """A gzip stream split across multiple feed() calls must still work."""
+        import gzip
+
+        clear_session_tokens()
+        try:
+            jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value"
+            # Large enough plaintext that gzip produces several bytes
+            plaintext = (f'{{"result":{{"jwt":"{jwt}","pad":"' + "x" * 500 + '"}}}').encode()
+            gzipped = gzip.compress(plaintext)
+            # Split the gzip stream in the middle
+            mid = len(gzipped) // 2
+            part1, part2 = gzipped[:mid], gzipped[mid:]
+
+            h = SessionTokenHarvester("example.com", "gzip")
+            h.feed(part1)
+            h.feed(part2)
+            h.close()
+            assert jwt in get_session_tokens("example.com")
+        finally:
+            clear_session_tokens()
+
+    def test_harvester_identity_passthrough(self):
+        """Uncompressed (or ``identity``) responses must still harvest."""
+        clear_session_tokens()
+        try:
+            jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.sig"
+            body = f'{{"jwt":"{jwt}"}}'.encode()
+            for encoding in ("", "identity"):
+                clear_session_tokens()
+                h = SessionTokenHarvester("example.com", encoding)
+                h.feed(body)
+                h.close()
+                assert jwt in get_session_tokens("example.com")
+        finally:
+            clear_session_tokens()
+
+    def test_harvester_unsupported_encoding_is_noop(self):
+        """Brotli / zstd responses are not supported — harvester should no-op."""
+        clear_session_tokens()
+        try:
+            body = b'{"jwt":"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.sig"}'
+            h = SessionTokenHarvester("example.com", "br")
+            # Feed random bytes — they're not real brotli but the harvester
+            # just ignores the body entirely for unsupported encodings.
+            h.feed(body)
+            h.close()
+            assert get_session_tokens("example.com") == set()
+        finally:
+            clear_session_tokens()
 
     def test_exclude_values_short_substring_not_suppressed(self, redact_scanner):
         """A short secret that is a substring of the auth token must still be caught.
