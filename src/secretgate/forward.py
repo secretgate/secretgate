@@ -207,7 +207,7 @@ class _ConnectionHandler:
         """Harvest JWTs from upstream response data into the host-keyed store."""
         added = remember_session_tokens(host, data)
         if added:
-            logger.debug("session_token_harvested", host=host, count=added)
+            logger.info("session_token_harvested", host=host, count=added)
 
     async def run(self) -> None:
         """Read the initial request and dispatch."""
@@ -543,7 +543,7 @@ class _ConnectionHandler:
             # responses to the same host (issue #66).
             exclude_values: set[str] = get_session_tokens(host)
             if exclude_values:
-                logger.debug("session_tokens_loaded", host=host, count=len(exclude_values))
+                logger.info("session_tokens_loaded", host=host, count=len(exclude_values))
             auth_header = req_headers.get("authorization", "")
             if auth_header:
                 # Strip "Bearer " / "Basic " prefix to get the raw token

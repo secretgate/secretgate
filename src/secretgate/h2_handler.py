@@ -453,7 +453,7 @@ class H2ConnectionHandler:
         # responses to the same host (issue #66).
         exclude_values: set[str] = get_session_tokens(self._host)
         if exclude_values:
-            logger.debug("h2_session_tokens_loaded", host=self._host, count=len(exclude_values))
+            logger.info("h2_session_tokens_loaded", host=self._host, count=len(exclude_values))
         for n, v in headers:
             if n == "authorization" and v:
                 parts = v.split(None, 1)
@@ -573,7 +573,7 @@ class H2ConnectionHandler:
         if data:
             added = remember_session_tokens(self._host, data)
             if added:
-                logger.debug("h2_session_token_harvested", host=self._host, count=added)
+                logger.info("h2_session_token_harvested", host=self._host, count=added)
 
         client_stream_id = self._upstream_to_client.get(upstream_stream_id)
         if client_stream_id is None:
