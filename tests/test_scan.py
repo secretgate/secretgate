@@ -8,6 +8,7 @@ import pytest
 
 from secretgate.scan import (
     BlockedError,
+    SessionTokenHarvester,
     TextScanner,
     _blank_gemini_part,
     _strip_cohere,
@@ -212,6 +213,77 @@ class TestScanBody:
             assert jwt.encode() in result
             assert b"REDACTED<jwt-token" not in result
             assert alerts == []
+        finally:
+            clear_session_tokens()
+
+    def test_harvester_gzip_decompresses_before_matching(self):
+        """Issue #66: Cloudflare returns gzip — harvester must decompress."""
+        import gzip
+
+        clear_session_tokens()
+        try:
+            jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value"
+            plaintext = f'{{"result":{{"jwt":"{jwt}"}}}}'.encode()
+            gzipped = gzip.compress(plaintext)
+            # Sanity: the regex must not match the gzipped bytes directly
+            assert extract_session_tokens(gzipped) == set()
+
+            h = SessionTokenHarvester("api.cloudflare.com", "gzip")
+            h.feed(gzipped)
+            added = h.close()
+            assert added == 1
+            assert jwt in get_session_tokens("api.cloudflare.com")
+        finally:
+            clear_session_tokens()
+
+    def test_harvester_gzip_streaming_multi_chunk(self):
+        """A gzip stream split across multiple feed() calls must still work."""
+        import gzip
+
+        clear_session_tokens()
+        try:
+            jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature_value"
+            # Large enough plaintext that gzip produces several bytes
+            plaintext = (f'{{"result":{{"jwt":"{jwt}","pad":"' + "x" * 500 + '"}}}').encode()
+            gzipped = gzip.compress(plaintext)
+            # Split the gzip stream in the middle
+            mid = len(gzipped) // 2
+            part1, part2 = gzipped[:mid], gzipped[mid:]
+
+            h = SessionTokenHarvester("example.com", "gzip")
+            h.feed(part1)
+            h.feed(part2)
+            h.close()
+            assert jwt in get_session_tokens("example.com")
+        finally:
+            clear_session_tokens()
+
+    def test_harvester_identity_passthrough(self):
+        """Uncompressed (or ``identity``) responses must still harvest."""
+        clear_session_tokens()
+        try:
+            jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.sig"
+            body = f'{{"jwt":"{jwt}"}}'.encode()
+            for encoding in ("", "identity"):
+                clear_session_tokens()
+                h = SessionTokenHarvester("example.com", encoding)
+                h.feed(body)
+                h.close()
+                assert jwt in get_session_tokens("example.com")
+        finally:
+            clear_session_tokens()
+
+    def test_harvester_unsupported_encoding_is_noop(self):
+        """Brotli / zstd responses are not supported — harvester should no-op."""
+        clear_session_tokens()
+        try:
+            body = b'{"jwt":"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.sig"}'
+            h = SessionTokenHarvester("example.com", "br")
+            # Feed random bytes — they're not real brotli but the harvester
+            # just ignores the body entirely for unsupported encodings.
+            h.feed(body)
+            h.close()
+            assert get_session_tokens("example.com") == set()
         finally:
             clear_session_tokens()
 

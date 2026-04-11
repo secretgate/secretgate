@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import zlib
 
 import structlog
 
@@ -90,6 +91,112 @@ def get_session_tokens(host: str) -> set[str]:
 def clear_session_tokens() -> None:
     """Clear all harvested session tokens.  Used by tests."""
     _SESSION_TOKENS_BY_HOST.clear()
+
+
+class SessionTokenHarvester:
+    """Streaming JWT harvester that decompresses gzip/deflate before scanning.
+
+    Cloudflare (and most APIs) return responses with ``Content-Encoding: gzip``.
+    Running the JWT regex on the compressed bytes silently finds nothing, so
+    session tokens issued by the upstream are never remembered and the same
+    tokens get redacted when the client echoes them back in a follow-up
+    request.  This class wraps a streaming decompressor so each chunk of the
+    upstream response is decompressed, then buffered, then scanned when the
+    response ends — buffering is necessary because a JWT may span multiple
+    compressed or un-compressed chunks.
+
+    A harvester is created per response (HTTP/1.1) or per stream (HTTP/2).
+    Callers:
+
+        h = SessionTokenHarvester(host, content_encoding)
+        for chunk in response_body_chunks:
+            h.feed(chunk)     # decompresses + buffers, relay chunk unmodified
+        h.close()             # decompress-flush + scan buffer, returns count
+    """
+
+    # Cap the per-response decompressed buffer so a pathological upstream
+    # cannot exhaust memory with a huge gzipped JSON body.
+    MAX_BUFFER = 1 * 1024 * 1024  # 1 MB
+
+    def __init__(self, host: str, content_encoding: str = "") -> None:
+        self._host = host
+        self._decompressor: zlib._Decompress | None = None
+        self._buffer = bytearray()
+        self._overflow = False
+        encoding = (content_encoding or "").lower().strip()
+        if encoding in ("gzip", "x-gzip", "deflate"):
+            # wbits = 32 + MAX_WBITS auto-detects gzip header vs zlib wrapper
+            # vs raw deflate, so a single path covers both encodings.
+            self._decompressor = zlib.decompressobj(32 + zlib.MAX_WBITS)
+            self._supported = True
+        elif encoding and encoding != "identity":
+            # br (brotli), zstd etc. — not supported, harvest will be a no-op
+            logger.debug(
+                "session_token_harvester_unsupported_encoding",
+                host=host,
+                encoding=encoding,
+            )
+            self._supported = False
+        else:
+            self._supported = True
+
+    def _append(self, data: bytes) -> None:
+        """Append data to the buffer, bounded by MAX_BUFFER."""
+        if self._overflow or not data:
+            return
+        room = self.MAX_BUFFER - len(self._buffer)
+        if room <= 0:
+            self._overflow = True
+            return
+        if len(data) > room:
+            self._buffer.extend(data[:room])
+            self._overflow = True
+        else:
+            self._buffer.extend(data)
+
+    def feed(self, data: bytes) -> int:
+        """Feed one chunk of the upstream response body.
+
+        Returns 0 — tokens are scanned on ``close()``.  Relay the original
+        (un-decompressed) ``data`` bytes to the client unchanged; this method
+        only observes, it never mutates.
+        """
+        if not data or not self._supported:
+            return 0
+        if self._decompressor is not None:
+            try:
+                decompressed = self._decompressor.decompress(data)
+            except zlib.error:
+                # Corrupt stream — disable further decompression on this
+                # harvester so we don't keep retrying on each chunk.
+                self._supported = False
+                return 0
+            if decompressed:
+                self._append(decompressed)
+        else:
+            self._append(data)
+        return 0
+
+    def close(self) -> int:
+        """Flush trailing state and scan the accumulated buffer.
+
+        Returns the number of new tokens added to the per-host store.
+        """
+        if not self._supported:
+            return 0
+        if self._decompressor is not None:
+            try:
+                tail = self._decompressor.flush()
+            except zlib.error:
+                tail = b""
+            if tail:
+                self._append(tail)
+        if not self._buffer:
+            return 0
+        added = remember_session_tokens(self._host, bytes(self._buffer))
+        # Release buffer memory once scanned
+        self._buffer = bytearray()
+        return added
 
 
 # Content types that should never be scanned (binary data)

@@ -19,9 +19,9 @@ from secretgate.certs import CertAuthority
 from secretgate.h2_handler import H2ConnectionHandler
 from secretgate.scan import (
     BlockedError,
+    SessionTokenHarvester,
     TextScanner,
     get_session_tokens,
-    remember_session_tokens,
 )
 
 logger = structlog.get_logger()
@@ -203,11 +203,20 @@ class _ConnectionHandler:
         return bool(_AUTH_PATH_PATTERNS.search(path))
 
     @staticmethod
-    def _record_session_tokens(host: str, data: bytes) -> None:
-        """Harvest JWTs from upstream response data into the host-keyed store."""
-        added = remember_session_tokens(host, data)
+    def _harvest(harvester: SessionTokenHarvester, data: bytes) -> None:
+        """Feed response body data to the session-token harvester.
+
+        The harvester buffers decompressed data and scans on ``close()``
+        so JWTs spanning chunk boundaries are caught reliably.
+        """
+        harvester.feed(data)
+
+    @staticmethod
+    def _harvest_flush(harvester: SessionTokenHarvester) -> None:
+        """Flush the harvester at end-of-response and emit a diagnostic log."""
+        added = harvester.close()
         if added:
-            logger.info("session_token_harvested", host=host, count=added)
+            logger.info("session_token_harvested", host=harvester._host, count=added)
 
     async def run(self) -> None:
         """Read the initial request and dispatch."""
@@ -706,9 +715,15 @@ class _ConnectionHandler:
             transfer_encoding = resp_headers.get("transfer-encoding", "").lower()
             resp_content_length = resp_headers.get("content-length")
             connection = resp_headers.get("connection", "").lower()
+            resp_content_encoding = resp_headers.get("content-encoding", "")
+
+            # Harvester for JWT-shaped session tokens issued by the upstream.
+            # Decompresses gzip/deflate before pattern matching so Cloudflare-
+            # style gzipped JSON responses are handled correctly (issue #66).
+            harvester = SessionTokenHarvester(host, resp_content_encoding)
 
             if resp_body_start:
-                self._record_session_tokens(host, resp_body_start)
+                self._harvest(harvester, resp_body_start)
                 client_writer.write(resp_body_start)
                 await client_writer.drain()
 
@@ -720,19 +735,20 @@ class _ConnectionHandler:
                     remaining = cl - sent
                     chunk = await upstream_reader.read(min(remaining, 65536))
                     if not chunk:
+                        self._harvest_flush(harvester)
                         return
-                    self._record_session_tokens(host, chunk)
+                    self._harvest(harvester, chunk)
                     client_writer.write(chunk)
                     await client_writer.drain()
                     sent += len(chunk)
+                self._harvest_flush(harvester)
             elif "chunked" in transfer_encoding:
-                # Use h11 to properly detect end of chunked response stream.
-                # h11 tracks chunk framing and emits EndOfMessage at the terminal chunk.
+                # Use h11 to properly detect end of chunked response stream
+                # AND to extract decoded chunk data for the harvester (the raw
+                # socket bytes contain chunk-size prefixes that would split
+                # JWTs across boundaries and defeat the regex).
                 resp_conn = h11.Connection(our_role=h11.CLIENT)
-                # Put h11 in the correct state by telling it we "sent" a request
                 method_str = request_line.split(" ", 1)[0]
-                # Only include headers h11 needs for response parsing (host).
-                # Exclude body-framing headers so h11 doesn't expect request body data.
                 skip_headers = {"content-length", "transfer-encoding", "content-type"}
                 h11_headers = [
                     (k.encode("latin-1"), v.encode("latin-1"))
@@ -748,12 +764,25 @@ class _ConnectionHandler:
                 )
                 resp_conn.send(h11.EndOfMessage())
 
-                # Feed the response data we already have (headers + any body start)
+                # resp_body_start was already relayed above AND h11 already has
+                # the header data — feed any remaining bytes (which may include
+                # body bytes beyond the header boundary) and drain Data events
+                # into the harvester before entering the read loop.
                 resp_conn.receive_data(resp_header_data)
                 resp_done = False
                 while True:
                     ev = resp_conn.next_event()
-                    if isinstance(ev, (h11.Response, h11.InformationalResponse, h11.Data)):
+                    if isinstance(ev, h11.Data):
+                        # Decoded chunk contents — note resp_body_start raw
+                        # bytes were also fed above via _harvest, which is a
+                        # no-op when the harvester is chunked-aware; but for
+                        # non-chunked resp_body_start it is the right data.
+                        # For chunked encoding, the raw resp_body_start will
+                        # contain chunk-size prefixes, so re-feed the decoded
+                        # Data payload here for reliable matching.
+                        self._harvest(harvester, ev.data)
+                        continue
+                    elif isinstance(ev, (h11.Response, h11.InformationalResponse)):
                         continue
                     elif isinstance(ev, h11.EndOfMessage):
                         resp_done = True
@@ -766,14 +795,15 @@ class _ConnectionHandler:
                 while not resp_done:
                     chunk = await upstream_reader.read(65536)
                     if not chunk:
+                        self._harvest_flush(harvester)
                         return
-                    self._record_session_tokens(host, chunk)
                     client_writer.write(chunk)
                     await client_writer.drain()
                     resp_conn.receive_data(chunk)
                     while True:
                         ev = resp_conn.next_event()
                         if isinstance(ev, h11.Data):
+                            self._harvest(harvester, ev.data)
                             continue
                         elif isinstance(ev, h11.EndOfMessage):
                             resp_done = True
@@ -783,6 +813,7 @@ class _ConnectionHandler:
                         else:
                             resp_done = True
                             break
+                self._harvest_flush(harvester)
             else:
                 # No content-length, no chunked — read until connection close
                 try:
@@ -790,11 +821,12 @@ class _ConnectionHandler:
                         chunk = await upstream_reader.read(65536)
                         if not chunk:
                             break
-                        self._record_session_tokens(host, chunk)
+                        self._harvest(harvester, chunk)
                         client_writer.write(chunk)
                         await client_writer.drain()
                 except (ConnectionResetError, BrokenPipeError):
                     pass
+                self._harvest_flush(harvester)
                 return  # connection is done
 
             if connection == "close":
@@ -897,16 +929,23 @@ class _ConnectionHandler:
         up_writer.write(modified_headers + scanned_body)
         await up_writer.drain()
 
-        # Relay response back
+        # Relay response back.  Plain-HTTP forward proxy mode does not parse
+        # response headers so we don't know the Content-Encoding; create a
+        # passthrough harvester so uncompressed bodies still contribute to
+        # the per-host session-token store.  Gzipped plain-HTTP responses
+        # will be a no-op here, which is acceptable because plain HTTP is
+        # not the hot path for the issue #66 wrangler flow.
+        harvester = SessionTokenHarvester(host)
         try:
             while True:
                 chunk = await up_reader.read(65536)
                 if not chunk:
                     break
-                self._record_session_tokens(host, chunk)
+                self._harvest(harvester, chunk)
                 self._writer.write(chunk)
                 await self._writer.drain()
         except (ConnectionResetError, BrokenPipeError):
             pass
         finally:
+            self._harvest_flush(harvester)
             up_writer.close()

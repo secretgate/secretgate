@@ -21,9 +21,9 @@ import structlog
 
 from secretgate.scan import (
     BlockedError,
+    SessionTokenHarvester,
     TextScanner,
     get_session_tokens,
-    remember_session_tokens,
 )
 
 logger = structlog.get_logger()
@@ -116,6 +116,10 @@ class H2ConnectionHandler:
         self._upstream_pending: dict[int, tuple[bytes, bool]] = {}
         # Requests queued because upstream MAX_CONCURRENT_STREAMS was reached
         self._queued_requests: list[_QueuedRequest] = []
+        # Streaming JWT harvester per upstream stream.  Created when the
+        # upstream sends response headers (so we know the content-encoding)
+        # and destroyed when the response completes or the stream resets.
+        self._response_harvesters: dict[int, SessionTokenHarvester] = {}
 
     @staticmethod
     def _apply_window_settings(conn: h2.connection.H2Connection) -> None:
@@ -549,10 +553,20 @@ class H2ConnectionHandler:
 
         # Decode header tuples
         decoded = []
+        content_encoding = ""
         for name, value in headers:
             n = name.decode("utf-8") if isinstance(name, bytes) else name
             v = value.decode("utf-8") if isinstance(value, bytes) else value
             decoded.append((n, v))
+            if n.lower() == "content-encoding":
+                content_encoding = v
+
+        # Create a streaming JWT harvester for this response.  Cloudflare
+        # (and most APIs) return gzipped JSON, so the harvester must
+        # decompress before pattern matching (issue #66).
+        self._response_harvesters[upstream_stream_id] = SessionTokenHarvester(
+            self._host, content_encoding
+        )
 
         try:
             self._client_conn.send_headers(client_stream_id, decoded)
@@ -570,10 +584,11 @@ class H2ConnectionHandler:
 
         # Harvest JWTs the upstream issues so we don't redact them when the
         # client echoes them back in a follow-up request body (issue #66).
-        if data:
-            added = remember_session_tokens(self._host, data)
-            if added:
-                logger.info("h2_session_token_harvested", host=self._host, count=added)
+        # The harvester transparently decompresses gzip/deflate and buffers
+        # data until _on_response_complete, which scans the full response.
+        harvester = self._response_harvesters.get(upstream_stream_id)
+        if data and harvester is not None:
+            harvester.feed(data)
 
         client_stream_id = self._upstream_to_client.get(upstream_stream_id)
         if client_stream_id is None:
@@ -594,6 +609,14 @@ class H2ConnectionHandler:
 
     async def _on_response_complete(self, upstream_stream_id: int) -> None:
         """Upstream finished sending response (END_STREAM)."""
+        # Flush the streaming harvester — decompressors may hold trailing
+        # state until they see the stream end.
+        harvester = self._response_harvesters.pop(upstream_stream_id, None)
+        if harvester is not None:
+            added = harvester.close()
+            if added:
+                logger.info("h2_session_token_harvested", host=self._host, count=added)
+
         client_stream_id = self._upstream_to_client.get(upstream_stream_id)
         if client_stream_id is None:
             return
@@ -632,6 +655,8 @@ class H2ConnectionHandler:
 
     async def _on_upstream_stream_reset(self, upstream_stream_id: int) -> None:
         """Upstream reset a stream — propagate to client."""
+        # Drop any partial harvester state for this stream.
+        self._response_harvesters.pop(upstream_stream_id, None)
         client_stream_id = self._upstream_to_client.get(upstream_stream_id)
         if client_stream_id is not None:
             try:
