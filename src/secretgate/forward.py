@@ -524,9 +524,21 @@ class _ConnectionHandler:
             skip_scan = self._is_auth_path(req_path)
             if skip_scan:
                 logger.debug("forward_skip_auth_path", host=host, path=req_path)
+
+            # Extract auth token so we never redact the request's own
+            # credential when it also appears in the body (issue #64).
+            exclude_values: set[str] = set()
+            auth_header = req_headers.get("authorization", "")
+            if auth_header:
+                # Strip "Bearer " / "Basic " prefix to get the raw token
+                parts = auth_header.split(None, 1)
+                exclude_values.add(parts[-1] if parts else auth_header)
+
             if body and content_length > 0 and not skip_scan:
                 try:
-                    scanned_body, alerts = self._scanner.scan_body(body, content_type)
+                    scanned_body, alerts = self._scanner.scan_body(
+                        body, content_type, exclude_values=exclude_values
+                    )
                     for alert in alerts:
                         logger.warning("forward_proxy_alert", host=host, alert=alert)
                 except BlockedError as exc:

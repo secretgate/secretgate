@@ -109,6 +109,51 @@ class TestScanBody:
         assert b"REDACTED<" in result
         assert len(alerts) > 0
 
+    def test_exclude_values_skips_auth_token(self, redact_scanner):
+        """A JWT that matches the request's own Authorization header should not be redacted."""
+        jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.sig_value_here"
+        body = f'{{"metadata":{{"token":"{jwt}"}}}}'.encode()
+        # Without exclusion — JWT gets redacted
+        result_no_excl, alerts_no_excl = redact_scanner.scan_body(body, "application/json")
+        assert jwt.encode() not in result_no_excl
+        assert len(alerts_no_excl) > 0
+
+        # With exclusion — JWT passes through
+        result_excl, alerts_excl = redact_scanner.scan_body(
+            body, "application/json", exclude_values={jwt}
+        )
+        assert result_excl == body
+        assert alerts_excl == []
+
+    def test_exclude_values_still_catches_other_secrets(self, redact_scanner):
+        """Excluding the auth token should not suppress unrelated secrets."""
+        jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.sig_value_here"
+        # Use JSON format so entropy scanner doesn't create overlapping matches
+        body = f'{{"auth":"{jwt}","aws_key":"AKIAIOSFODNN7EXAMPLE"}}'.encode()
+        result, alerts = redact_scanner.scan_body(body, "application/json", exclude_values={jwt})
+        # JWT passes through, AWS key still redacted
+        assert jwt.encode() in result
+        assert b"AKIAIOSFODNN7EXAMPLE" not in result
+        assert len(alerts) > 0
+
+    def test_exclude_values_short_substring_not_suppressed(self, redact_scanner):
+        """A short secret that is a substring of the auth token must still be caught.
+
+        This guards against exfiltration via embedding a stolen secret inside
+        a crafted auth token.
+        """
+        # Construct a long fake auth token that embeds an AWS key as a substring
+        aws_key = "AKIAIOSFODNN7EXAMPLE"
+        long_token = f"prefix_{aws_key}_suffix_padding_to_make_it_very_long_token_value"
+        body = f'{{"key":"{aws_key}"}}'.encode()
+        result, alerts = redact_scanner.scan_body(
+            body, "application/json", exclude_values={long_token}
+        )
+        # AWS key is <50% of the long token, so it must NOT be excluded
+        assert b"AKIAIOSFODNN7EXAMPLE" not in result
+        assert b"REDACTED<" in result
+        assert len(alerts) > 0
+
 
 # ---------------------------------------------------------------------------
 # Format detection and stripping tests

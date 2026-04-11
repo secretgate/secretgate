@@ -110,12 +110,22 @@ class TextScanner:
             alerts,
         )
 
-    def scan_body(self, body: bytes, content_type: str = "text/plain") -> tuple[bytes, list[str]]:
+    def scan_body(
+        self,
+        body: bytes,
+        content_type: str = "text/plain",
+        exclude_values: set[str] | None = None,
+    ) -> tuple[bytes, list[str]]:
         """Scan body bytes for secrets. Returns (possibly modified body, alerts).
 
         In block mode, raises BlockedError if secrets are found.
         In audit mode, returns body unchanged but with alerts.
         In redact mode, replaces secrets with [REDACTED] markers.
+
+        ``exclude_values`` — secret values to ignore (e.g. the request's own
+        Authorization token).  If a match's value is contained in any of the
+        exclude strings it is silently dropped so the proxy never corrupts a
+        request by redacting its own auth credential.
         """
         alerts: list[str] = []
 
@@ -138,6 +148,20 @@ class TextScanner:
         scannable = self._strip_model_content(text) if "json" in ct else text
 
         matches = self._scanner.scan(scannable)
+
+        # Drop matches that ARE the request's own auth token (not just any
+        # substring).  A match is considered "the same credential" when it
+        # covers ≥50 % of an exclude value's length — this allows partial
+        # regex captures (e.g. JWT pattern grabbing 2 of 3 segments) while
+        # preventing a short, unrelated secret from being silently skipped
+        # just because it happens to appear inside a long token string.
+        if matches and exclude_values:
+            matches = [
+                m
+                for m in matches
+                if not any(m.value in ev and len(m.value) >= len(ev) * 0.5 for ev in exclude_values)
+            ]
+
         if not matches:
             return body, alerts
 
