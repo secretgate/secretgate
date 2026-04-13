@@ -409,6 +409,69 @@ class TextScanner:
 # Format-specific stripping helpers
 # ---------------------------------------------------------------------------
 
+# Allowlist of media types known to carry binary payloads (images, PDFs,
+# audio, video).  The base64 ``data`` field of a content block with one of
+# these media types decodes to opaque bytes that cannot contain text
+# secrets — but that DO trip the entropy detector and corrupt legitimate
+# content when redacted.  We only blank ``data`` when ``media_type`` is on
+# this allowlist so a field advertising itself as ``text/plain`` (or missing
+# a media type entirely) remains scannable for base64-encoded exfiltration.
+_BINARY_MEDIA_TYPE_PREFIXES = ("image/", "audio/", "video/")
+_BINARY_MEDIA_TYPES = frozenset({"application/pdf"})
+
+
+def _is_binary_media_type(media_type: str) -> bool:
+    if not isinstance(media_type, str) or not media_type:
+        return False
+    mt = media_type.lower().strip()
+    if any(mt.startswith(p) for p in _BINARY_MEDIA_TYPE_PREFIXES):
+        return True
+    return mt in _BINARY_MEDIA_TYPES
+
+
+def _blank_binary_image_data(block: dict) -> bool:
+    """Blank the base64 ``data`` field of image/document blocks with binary media.
+
+    The Anthropic content-block shape is
+    ``{"type":"image"|"document","source":{"type":"base64","media_type":"...","data":"..."}}``.
+    Only touches ``data`` — leaves ``media_type``, ``type``, and the rest of
+    the block intact so the upstream API still receives a valid request.
+    """
+    if not isinstance(block, dict):
+        return False
+    if block.get("type") not in ("image", "document"):
+        return False
+    source = block.get("source")
+    if not isinstance(source, dict):
+        return False
+    if source.get("type") != "base64":
+        return False
+    if not _is_binary_media_type(source.get("media_type", "")):
+        return False
+    data = source.get("data")
+    if not isinstance(data, str) or not data:
+        return False
+    source["data"] = ""
+    return True
+
+
+def _blank_binary_blocks(blocks: list) -> bool:
+    """Recursively blank binary image/document data in a content block list.
+
+    Descends into ``tool_result.content`` so image blocks nested inside a
+    tool result are also handled.
+    """
+    modified = False
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        modified = _blank_binary_image_data(block) or modified
+        if block.get("type") == "tool_result":
+            inner = block.get("content")
+            if isinstance(inner, list):
+                modified = _blank_binary_blocks(inner) or modified
+    return modified
+
 
 def _strip_messages_format(body: dict) -> bool:
     """Strip non-scannable content from OpenAI/Anthropic/Mistral message format.
@@ -450,7 +513,8 @@ def _strip_messages_format(body: dict) -> bool:
         if not isinstance(msg, dict):
             continue
 
-        # Keep the last user turn — strip only thinking blocks within it
+        # Keep the last user turn — strip only thinking blocks AND blank
+        # binary image/document data (high-entropy false positives).
         if i >= last_turn_start:
             content = msg.get("content")
             if isinstance(content, list):
@@ -460,6 +524,7 @@ def _strip_messages_format(body: dict) -> bool:
                             if key in block and block[key]:
                                 block[key] = ""
                                 modified = True
+                modified = _blank_binary_blocks(content) or modified
             continue
 
         # Blank all earlier messages
@@ -601,6 +666,8 @@ def _blank_message(msg: dict) -> bool:
                     if key in source and isinstance(source[key], str) and source[key]:
                         source[key] = ""
                         modified = True
+            # Anthropic image/document binary base64 data
+            modified = _blank_binary_image_data(block) or modified
 
     # OpenAI tool_calls — blank function arguments
     for tc in msg.get("tool_calls", []):
