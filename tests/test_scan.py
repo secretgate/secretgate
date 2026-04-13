@@ -10,6 +10,7 @@ from secretgate.scan import (
     BlockedError,
     SessionTokenHarvester,
     TextScanner,
+    _blank_binary_image_data,
     _blank_gemini_part,
     _strip_cohere,
     _strip_gemini,
@@ -511,6 +512,167 @@ class TestStripMessagesFormat:
         }
         _strip_messages_format(body)
         assert body["messages"][0]["content"][0]["content"] == []
+
+
+class TestBinaryImageData:
+    """Tests for blanking binary image/document data before scanning.
+
+    Claude Code vision was broken through secretgate because the entropy
+    detector fired on high-entropy base64 image payloads.  The fix blanks
+    the ``data`` field of image/document blocks when the ``media_type`` is
+    a known binary type (image/*, audio/*, video/*, application/pdf).
+    """
+
+    def test_blank_image_png_in_last_user_turn(self):
+        body = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "iVBORw0KGgoAAAANSUhEUgAAAAUAAAAFCAYAAACNbyblAAAAHElEQVQI12P4",
+                            },
+                        },
+                        {"type": "text", "text": "what is this?"},
+                    ],
+                }
+            ]
+        }
+        _strip_messages_format(body)
+        img = body["messages"][0]["content"][0]
+        assert img["source"]["data"] == ""
+        # The rest of the block is preserved so the request stays valid
+        assert img["source"]["media_type"] == "image/png"
+        assert img["source"]["type"] == "base64"
+        assert img["type"] == "image"
+
+    def test_blank_document_pdf_in_last_user_turn(self):
+        body = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": "JVBERi0xLjQKJeLjz9MK",
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+        _strip_messages_format(body)
+        assert body["messages"][0]["content"][0]["source"]["data"] == ""
+
+    def test_blank_image_nested_in_tool_result(self):
+        body = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "abc",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/jpeg",
+                                        "data": "/9j/4AAQSkZJRgABAQAAAQABAAD/",
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        _strip_messages_format(body)
+        nested = body["messages"][0]["content"][0]["content"][0]
+        assert nested["source"]["data"] == ""
+
+    def test_non_binary_media_type_not_blanked(self):
+        """text/plain or missing media_type leaves data scannable (exfiltration guard)."""
+        # text/plain — not in allowlist
+        block = {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "text/plain",
+                "data": "aGVsbG8=",
+            },
+        }
+        assert _blank_binary_image_data(block) is False
+        assert block["source"]["data"] == "aGVsbG8="
+
+        # Missing media_type — conservative default, not blanked
+        block2 = {
+            "type": "image",
+            "source": {"type": "base64", "data": "aGVsbG8="},
+        }
+        assert _blank_binary_image_data(block2) is False
+
+    def test_non_base64_source_not_touched(self):
+        """URL sources and other non-base64 source types are left alone."""
+        block = {
+            "type": "image",
+            "source": {"type": "url", "url": "https://example.com/img.png"},
+        }
+        assert _blank_binary_image_data(block) is False
+
+    def test_non_image_block_not_touched(self):
+        block = {"type": "text", "text": "hello"}
+        assert _blank_binary_image_data(block) is False
+
+    def test_scan_body_does_not_alert_on_image_png(self, redact_scanner):
+        """Integration: a high-entropy image payload in a real Anthropic
+        request must not trigger an alert (the entropy scanner previously
+        false-positived and corrupted the base64)."""
+        # Real-ish PNG preamble + long high-entropy base64 body
+        png_b64 = (
+            "iVBORw0KGgoAAAANSUhEUgAAA"
+            "ABCDEFabcdef0123456789+/AAABBBCCCDDDEEEFFFGGG"
+            "HHHIIIJJJKKKLLLMMMNNNOOOPPPQQQRRRSSSTTTUUUVVV"
+            "WWWXXXYYYZZZaaabbbcccdddeeefffggghhhiiijjjkkk"
+        )
+        payload = {
+            "model": "claude-sonnet-4-5",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": png_b64,
+                            },
+                        },
+                        {"type": "text", "text": "describe this"},
+                    ],
+                }
+            ],
+        }
+        body = json.dumps(payload).encode()
+        result, alerts = redact_scanner.scan_body(body, "application/json")
+        # No entropy false positive on the image data
+        assert alerts == []
+        # Outbound body is unchanged — the image reaches Anthropic intact.
+        # Blanking happens only on the scan-only copy, never on the wire.
+        out = json.loads(result.decode())
+        img = out["messages"][0]["content"][0]
+        assert img["type"] == "image"
+        assert img["source"]["media_type"] == "image/png"
+        assert img["source"]["data"] == png_b64
 
 
 class TestStripGemini:
